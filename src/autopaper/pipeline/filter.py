@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from autopaper.models import Paper, Topic
 from autopaper.textutil import normalize_title
@@ -12,6 +12,7 @@ class FilterResult:
     dropped_exclude: int = 0
     dropped_keyword: int = 0
     dropped_domain: int = 0
+    keyword_misses: list[Paper] = field(default_factory=list)
 
 
 def paper_haystack(paper: Paper) -> str:
@@ -64,6 +65,8 @@ def filter_papers(papers: list[Paper], topic: Topic) -> FilterResult:
             continue
         if not passes_keywords(topic, haystack):
             result.dropped_keyword += 1
+            if passes_domain(paper, topic, haystack):
+                result.keyword_misses.append(paper)
             continue
         if not passes_domain(paper, topic, haystack):
             result.dropped_domain += 1

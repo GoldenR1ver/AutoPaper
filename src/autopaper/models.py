@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
-from autopaper.textutil import collapse_ws, dedupe_names, max_optional, normalize_title
+from autopaper.textutil import collapse_ws, dedupe_names, max_optional, normalize_match, normalize_title
 
 
 @dataclass
@@ -165,30 +165,52 @@ def prefer_year(left: Paper, right: Paper) -> int | None:
     return left.year or right.year
 
 
+def _prefer_text(left: str | None, right: str | None) -> str | None:
+    """两边都有值时取更完整的一条；一样长就按文本排序，不看谁先到。"""
+    first = collapse_ws(left)
+    second = collapse_ws(right)
+    if not first:
+        return second or None
+    if not second:
+        return first
+    return sorted((first, second), key=lambda item: (-len(item), item.casefold(), item))[0]
+
+
+def _prefer_name_list(left: list[str], right: list[str]) -> list[str]:
+    groups = [dedupe_names(left), dedupe_names(right)]
+    groups = sorted(
+        groups,
+        key=lambda names: (
+            -len(names),
+            tuple(normalize_match(name) for name in names),
+            tuple(names),
+        ),
+    )
+    return dedupe_names([*groups[0], *groups[1]])
+
+
 def merge_papers(left: Paper, right: Paper) -> Paper:
-    """合并同一篇论文的两条记录，补齐缺失字段。"""
-    left_title = left.title or ""
-    right_title = right.title or ""
-    title = left_title if len(left_title) >= len(right_title) else right_title
-    left_abstract = left.abstract or ""
-    right_abstract = right.abstract or ""
-    abstract = left_abstract if len(left_abstract) >= len(right_abstract) else right_abstract
+    """合并同一篇论文的两条记录，补齐缺失字段。结果与左右顺序无关。"""
+    sources = _prefer_name_list([*left.sources, left.source], [*right.sources, right.source])
     merged = Paper(
-        title=title,
-        abstract=abstract,
-        authors=dedupe_names([*left.authors, *right.authors]),
+        title=_prefer_text(left.title, right.title) or "",
+        abstract=_prefer_text(left.abstract, right.abstract) or "",
+        authors=_prefer_name_list(left.authors, right.authors),
         year=prefer_year(left, right),
         doi=left.doi or right.doi,
         arxiv_id=left.arxiv_id or right.arxiv_id,
         pubmed_id=left.pubmed_id or right.pubmed_id,
         s2_id=left.s2_id or right.s2_id,
         openalex_id=left.openalex_id or right.openalex_id,
-        url=left.url or right.url,
-        pdf_url=left.pdf_url or right.pdf_url,
-        venue=left.venue or right.venue,
+        url=_prefer_text(left.url, right.url),
+        pdf_url=_prefer_text(left.pdf_url, right.pdf_url),
+        venue=_prefer_text(left.venue, right.venue),
         citation_count=max_optional(left.citation_count, right.citation_count),
-        categories=dedupe_names([*left.categories, *right.categories]),
-        source=left.source or right.source,
-        sources=dedupe_names([*left.sources, *right.sources, left.source, right.source]),
+        categories=_prefer_name_list(left.categories, right.categories),
+        source=sources[0] if sources else "",
+        sources=sources,
+        local_path=_prefer_text(left.local_path, right.local_path) or "",
     )
-    return merged.cleanup()
+    merged.cleanup()
+    merged.key = make_key(merged)
+    return merged

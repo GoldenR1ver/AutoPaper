@@ -15,6 +15,16 @@ llm:
   base_url: https://api.openai.com/v1
   model: gpt-4o-mini
   temperature: 0.2
+  # 向量召回。对话走 DeepSeek 时，这里填一个提供 embedding 的地址；留空则沿用上面的 base_url。
+  # DeepSeek 目前没有 embedding，留空会跳过语义召回。
+  embedding_base_url:
+  embedding_model: text-embedding-3-small
+
+# 字面主题词没命中时，用向量把语义相近的论文补回候选。
+recall:
+  similarity: 0.42
+  limit: 30
+  embed_limit: 400
 
 sources:
   timeout_seconds: 40

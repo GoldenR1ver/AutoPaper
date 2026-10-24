@@ -22,6 +22,7 @@
           <button type="button" id="mode-network" role="tab">知识网络</button>
         </div>
         <button type="button" id="library-open">我的笔记库</button>
+        <button type="button" id="fill-biblio">补全题录</button>
         <button type="button" class="primary" id="upload-open">上传论文</button>
       </div>
     </header>
@@ -113,6 +114,16 @@
     <button type="button" class="color-dot pink" data-color="pink" title="粉色高亮"></button>
     <button type="button" class="color-dot orange" data-color="orange" title="橙色高亮"></button>
     <button type="button" id="select-annotate" class="text">批注</button>
+    <button type="button" id="select-ask" class="text">追问</button>
+    <div id="ask-box" hidden>
+      <div id="ask-questions" class="chips"></div>
+      <div class="ask-custom">
+        <input id="ask-custom" type="text" placeholder="或写下自己的问题" />
+        <button type="button" id="ask-custom-send" class="text">提问</button>
+      </div>
+      <p id="ask-answer" class="meta-line"></p>
+      <button type="button" id="ask-save" class="primary" disabled>快速保存为笔记</button>
+    </div>
     <div id="annotate-box" hidden>
       <textarea id="annotate-text" placeholder="写下批注"></textarea>
       <button type="button" class="primary" id="annotate-save">保存</button>

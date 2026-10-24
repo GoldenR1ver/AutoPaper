@@ -122,6 +122,70 @@ overview, authors, paper_relations, tensions, open_questions
 - tensions、open_questions 是字符串数组。"""
 
 
+FOLLOWUP_SYSTEM = """你是科研阅读助手。只根据给定的本地笔记和划取段落回答。
+不要补充笔记里没有的论文、数字、任职、合作关系或引用。笔记没有写明的内容，写“笔记未说明”。
+使用简体中文，只写两到四句，不要分节，不要使用 Markdown。
+只输出一个 JSON 对象，键为 answer。"""
+
+
+FOLLOWUP_QUESTIONS = (
+    ("meaning", "这段在说什么", "用两到四句说明这段实际在主张什么，点明它谈论的对象、做法或结果。"),
+    ("whole", "和全文的关系", "说明这段在整篇笔记中的角色：背景、问题、方法、结果、限度还是新问题，以及它如何支撑或限制全文的结论。"),
+    ("author", "和作者的关系", "说明这段怎样体现归类作者的研究方向、定位或惯用方法。只使用笔记里能看到的论文，不要写成在线作者主页。"),
+    ("topic", "和主题的关系", "说明这段把当前主题推进了哪一步。它是这个主题的直接证据、方法工具，还是只是相邻材料。"),
+    ("method", "方法能支持什么", "说明这段使用或描述的方法是什么，它能支持哪类判断，不能支持哪类判断。"),
+    ("evidence", "主张和证据", "分开写出这段里的主张、支撑它的证据，以及尚未证明的部分。"),
+    ("corpus", "和其他论文的关系", "若笔记提到其他论文或学者，说明这段与它们是递进、并列、方法复用、对照还是分歧，并指出依据来自哪里。没有提到就写笔记未说明。"),
+    ("gap", "还缺什么", "指出读完这段后，若要继续这项研究，笔记还回答不了的一个关键问题。"),
+    ("term", "术语", "解释这段里最需要核对的一个术语或指标，并说明笔记给它的定义。笔记没定义就写笔记未说明。"),
+    ("reproduce", "能否沿用", "说明若要把这段的做法用到自己的研究里，笔记已经给出了什么，还缺什么材料或步骤。"),
+)
+
+
+def followup_question(question_id: str) -> tuple[str, str] | None:
+    for ident, label, instruction in FOLLOWUP_QUESTIONS:
+        if ident == question_id:
+            return label, instruction
+    return None
+
+
+def followup_user_prompt(
+    *,
+    scope_name: str,
+    label: str,
+    authors: str,
+    topics: str,
+    instruction: str,
+    selected: str,
+    paragraphs: str,
+    note: str,
+) -> str:
+    clipped = _clip_note(note)
+    return f"""笔记类型：{scope_name}
+笔记名称：{label}
+归类作者：{authors or "笔记未说明"}
+归类主题：{topics or "笔记未说明"}
+
+要回答的问题：{instruction}
+
+划取的文字：
+{selected or "无"}
+
+划取所在的段落：
+{paragraphs}
+
+整篇笔记：
+{clipped}"""
+
+
+def _clip_note(note: str, limit: int = 12000) -> str:
+    text = (note or "").strip()
+    if len(text) <= limit:
+        return text or "笔记未说明"
+    head = int(limit * 0.75)
+    return text[:head] + "\n\n……（笔记后部已省略）……\n\n" + text[-(limit - head) :]
+
+
 REPORT_SYSTEM = """你是科研综述助手。只根据给定的论文题录和摘要写作，不要编造未提供的论文、数字或结论。
 使用简体中文。提到论文时使用其标题。输出 Markdown，包含三个小节：领域现状、主要路线、不足与开放问题。"""
 

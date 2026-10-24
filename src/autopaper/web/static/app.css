@@ -136,7 +136,22 @@ fieldset { border: 1px solid var(--line); border-radius: 12px; }
 .drop {
   display: grid; gap: 8px; padding: 14px; border: 1px dashed #c8bba8; border-radius: 12px; background: #faf7f1;
 }
-.message { min-height: 1.2em; }
+.message { min-height: 1.2em; white-space: pre-wrap; }
+.biblio {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.biblio label { display: grid; gap: 4px; font-size: 0.75rem; color: var(--muted); }
+.biblio input {
+  width: 100%; border: 1px solid var(--line); background: white; border-radius: 8px; padding: 6px 8px;
+}
+.biblio-actions, #biblio-message { grid-column: 1 / -1; }
+.biblio-actions { display: flex; gap: 8px; }
+#biblio-message { margin: 0; }
 .message.error { color: #8d2d2d; }
 .message.ok { color: var(--green); }
 
@@ -154,7 +169,8 @@ mark.hl-note { border-bottom: 2px solid var(--clay); }
   border-left: 3px solid var(--clay); font-size: 0.88rem;
 }
 #select-menu {
-  position: fixed; z-index: 40; display: flex; align-items: center; gap: 6px;
+  position: fixed; z-index: 40; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  width: max-content; max-width: min(440px, calc(100vw - 16px));
   padding: 6px; background: white; border: 1px solid var(--line); border-radius: 12px;
   box-shadow: var(--shadow);
 }
@@ -165,7 +181,16 @@ mark.hl-note { border-bottom: 2px solid var(--clay); }
 .color-dot.blue { background: #85b7f5; }
 .color-dot.pink { background: #f3a6c1; }
 .color-dot.orange { background: #f5b97a; }
-#annotate-box { display: flex; gap: 6px; align-items: flex-end; }
+#ask-box, #annotate-box { display: flex; gap: 6px; align-items: flex-end; }
+#ask-box { flex-basis: 100%; flex-direction: column; align-items: stretch; }
+#ask-box[hidden] { display: none; }
+#ask-questions { margin-top: 0; }
+#ask-questions .chip { font-size: 0.78rem; padding: 3px 8px; }
+.ask-custom { display: flex; gap: 6px; }
+.ask-custom input { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+#ask-answer { margin: 0; max-height: 9em; overflow: auto; white-space: pre-wrap; }
+#ask-save { align-self: flex-start; }
+#ask-save:disabled { opacity: 0.45; cursor: default; }
 #annotate-box[hidden] { display: none; }
 #annotate-text { width: 180px; min-height: 52px; border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
 .library-group { margin-top: 14px; }

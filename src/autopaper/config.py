@@ -27,6 +27,16 @@ llm:
   base_url: https://api.openai.com/v1
   model: gpt-4o-mini
   temperature: 0.2
+  # 向量召回。对话走 DeepSeek 时，这里填一个提供 embedding 的地址；留空则沿用上面的 base_url。
+  # DeepSeek 目前没有 embedding，留空会跳过语义召回。
+  embedding_base_url:
+  embedding_model: text-embedding-3-small
+
+# 字面主题词没命中时，用向量把语义相近的论文补回候选。
+recall:
+  similarity: 0.42
+  limit: 30
+  embed_limit: 400
 
 sources:
   timeout_seconds: 40
@@ -58,6 +68,13 @@ class Settings:
     default_delay_seconds: float = 0.3
     s2_delay_seconds: float = 1
     disable_llm: bool = False
+    disable_embedding: bool = False
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+    recall_similarity: float = 0.42
+    recall_limit: int = 30
+    recall_embed_limit: int = 400
 
     @property
     def database_path(self) -> Path:
@@ -132,8 +149,9 @@ def load_settings() -> Settings:
 
     llm = data.get("llm") or {}
     sources = data.get("sources") or {}
-    if not isinstance(llm, dict) or not isinstance(sources, dict):
-        raise ConfigError("llm 和 sources 必须是映射")
+    recall = data.get("recall") or {}
+    if not isinstance(llm, dict) or not isinstance(sources, dict) or not isinstance(recall, dict):
+        raise ConfigError("llm、sources 和 recall 必须是映射")
 
     data_dir = Path(
         os.environ.get("AUTOPAPER_DATA_DIR")
@@ -187,6 +205,42 @@ def load_settings() -> Settings:
     base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
     model = model or "gpt-4o-mini"
 
+    disable_embedding = bool(data.get("disable_embedding", False))
+    if "AUTOPAPER_DISABLE_EMBEDDING" in os.environ:
+        disable_embedding = _as_bool(os.environ["AUTOPAPER_DISABLE_EMBEDDING"])
+    embedding_model = os.environ.get("AUTOPAPER_EMBEDDING_MODEL") or str(llm.get("embedding_model") or "")
+    explicit_embedding_base = os.environ.get("AUTOPAPER_EMBEDDING_BASE_URL") or str(
+        llm.get("embedding_base_url") or ""
+    )
+    embedding_key = os.environ.get("AUTOPAPER_EMBEDDING_API_KEY") or ""
+    if disable_embedding:
+        embedding_base = ""
+        embedding_key = ""
+        embedding_model = ""
+    else:
+        embedding_key = embedding_key or api_key
+        if explicit_embedding_base.strip():
+            embedding_base = explicit_embedding_base.strip().rstrip("/")
+        elif "api.deepseek.com" in base_url:
+            embedding_base = ""
+        else:
+            embedding_base = base_url
+        if not embedding_base:
+            embedding_key = ""
+            embedding_model = ""
+        elif not embedding_model:
+            embedding_model = "text-embedding-3-small"
+
+    try:
+        recall_similarity = float(recall.get("similarity", 0.42))
+        recall_limit = int(recall.get("limit", 30))
+        recall_embed_limit = int(recall.get("embed_limit", 400))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("recall.similarity、recall.limit 和 recall.embed_limit 必须是数字") from exc
+    recall_similarity = min(1.0, max(0.0, recall_similarity))
+    recall_limit = max(0, recall_limit)
+    recall_embed_limit = max(0, recall_embed_limit)
+
     return Settings(
         data_dir=data_dir,
         mailto=mailto.strip(),
@@ -205,4 +259,11 @@ def load_settings() -> Settings:
         default_delay_seconds=float(sources.get("default_delay_seconds", 0.3)),
         s2_delay_seconds=float(sources.get("s2_delay_seconds", 1)),
         disable_llm=disable,
+        disable_embedding=disable_embedding,
+        embedding_base_url=embedding_base,
+        embedding_api_key=embedding_key,
+        embedding_model=embedding_model,
+        recall_similarity=recall_similarity,
+        recall_limit=recall_limit,
+        recall_embed_limit=recall_embed_limit,
     )

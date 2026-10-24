@@ -7,7 +7,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from autopaper.errors import AmbiguousError, AutoPaperError, NotFoundError
-from autopaper.models import Author, Paper, Relation, ResearcherProfile, ScoredPaper, Topic
+from autopaper.models import (
+    Author,
+    Paper,
+    Relation,
+    ResearcherProfile,
+    ScoredPaper,
+    Topic,
+    make_key,
+    merge_papers,
+)
 from autopaper.textutil import collapse_ws, like_pattern, normalize_match, normalize_title, slugify
 
 SCHEMA = """
@@ -359,14 +368,104 @@ class KnowledgeBase:
         existing = self._find_paper_row(paper)
         now = _iso(utcnow())
         if existing is None:
-            key = make_new_key(paper)
-            self._write_paper(key, paper, now, now, insert=True)
-            return key
-        from autopaper.models import merge_papers
-
+            key = make_key(paper)
+            clash = self.conn.execute("SELECT * FROM papers WHERE key = ?", (key,)).fetchone()
+            if clash is not None and self._compatible(clash, paper):
+                existing = clash
+            elif clash is not None:
+                key = self._disambiguate_key(key)
+                self._write_paper(key, paper, now, now, insert=True)
+                return key
+            else:
+                self._write_paper(key, paper, now, now, insert=True)
+                return key
         merged = merge_papers(self._paper(existing), paper)
-        self._write_paper(existing["key"], merged, existing["created_at"], now, insert=False)
-        return existing["key"]
+        canonical = make_key(merged)
+        created_at = existing["created_at"]
+        target_key = existing["key"]
+        if canonical != target_key:
+            occupant = self.conn.execute("SELECT * FROM papers WHERE key = ?", (canonical,)).fetchone()
+            if occupant is not None and occupant["key"] != target_key and self._compatible(occupant, merged):
+                merged = merge_papers(self._paper(occupant), merged)
+                canonical = make_key(merged)
+                created_at = min(created_at, occupant["created_at"])
+                self._adopt_key(target_key, canonical)
+                target_key = canonical
+            elif occupant is None:
+                self._adopt_key(target_key, canonical)
+                target_key = canonical
+        self._write_paper(target_key, merged, created_at, now, insert=False)
+        if created_at:
+            self.conn.execute(
+                "UPDATE papers SET created_at = ? WHERE key = ? AND created_at > ?",
+                (created_at, target_key, created_at),
+            )
+            self.conn.commit()
+        return target_key
+
+    def _disambiguate_key(self, key: str) -> str:
+        suffix = 2
+        while self.conn.execute("SELECT 1 FROM papers WHERE key = ?", (f"{key}:{suffix}",)).fetchone():
+            suffix += 1
+        return f"{key}:{suffix}"
+
+    def _adopt_key(self, old: str, new: str) -> None:
+        """把一篇论文的主键改成合并后的规范键，并带走主题、笔记和作者关联。"""
+        if not old or not new or old == new:
+            return
+
+        def move() -> None:
+            self._relink_paper(old, new)
+            occupant = self.conn.execute("SELECT 1 FROM papers WHERE key = ?", (new,)).fetchone()
+            if occupant is None:
+                self.conn.execute("UPDATE papers SET key = ? WHERE key = ?", (new, old))
+            else:
+                self.conn.execute("DELETE FROM papers WHERE key = ?", (old,))
+
+        self._with_fk_off(move)
+
+    def _relink_paper(self, old: str, new: str) -> None:
+        for table, owner in (
+            ("topic_papers", "topic_id"),
+            ("researcher_papers", "researcher_id"),
+            ("author_papers", "author_id"),
+        ):
+            self.conn.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE paper_key = ?
+                  AND {owner} IN (SELECT {owner} FROM {table} WHERE paper_key = ?)
+                """,
+                (old, new),
+            )
+            self.conn.execute(
+                f"UPDATE {table} SET paper_key = ? WHERE paper_key = ?",
+                (new, old),
+            )
+        self.conn.execute(
+            """
+            DELETE FROM readings
+            WHERE paper_key = ? AND EXISTS (SELECT 1 FROM readings AS kept WHERE kept.paper_key = ?)
+            """,
+            (old, new),
+        )
+        self.conn.execute("UPDATE readings SET paper_key = ? WHERE paper_key = ?", (new, old))
+        self.conn.execute(
+            "UPDATE highlights SET scope_id = ? WHERE scope = 'paper' AND scope_id = ?",
+            (new, old),
+        )
+
+    def _with_fk_off(self, action) -> None:
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            action()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
     def link_topic_paper(self, topic_id: str, scored: ScoredPaper, paper_key: str) -> None:
         self.conn.execute(
@@ -485,6 +584,25 @@ class KnowledgeBase:
               created_at = excluded.created_at
             """,
             (paper_key, _dumps(payload), markdown, _iso(utcnow())),
+        )
+        self.conn.commit()
+
+    def update_bibliography(self, paper: Paper) -> None:
+        paper.cleanup()
+        self.conn.execute(
+            """
+            UPDATE papers
+            SET year = ?, venue = ?, doi = ?, url = ?, updated_at = ?
+            WHERE key = ?
+            """,
+            (paper.year, paper.venue, paper.doi, paper.url, _iso(utcnow()), paper.key),
+        )
+        self.conn.commit()
+
+    def replace_reading_markdown(self, paper_key: str, markdown: str) -> None:
+        self.conn.execute(
+            "UPDATE readings SET markdown = ? WHERE paper_key = ?",
+            (markdown, paper_key),
         )
         self.conn.commit()
 
@@ -904,6 +1022,7 @@ class KnowledgeBase:
             _dumps(paper.sources),
             search_text,
             updated_at,
+            paper.local_path or None,
         )
         if insert:
             self.conn.execute(
@@ -911,8 +1030,8 @@ class KnowledgeBase:
                 INSERT INTO papers (
                   title, title_norm, abstract, authors, year, doi, arxiv_id, pubmed_id,
                   s2_id, openalex_id, url, pdf_url, venue, citation_count, categories,
-                  sources, search_text, updated_at, key, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  sources, search_text, updated_at, local_path, key, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (*values, key, created_at),
             )
@@ -923,7 +1042,7 @@ class KnowledgeBase:
                   title = ?, title_norm = ?, abstract = ?, authors = ?, year = ?, doi = ?,
                   arxiv_id = ?, pubmed_id = ?, s2_id = ?, openalex_id = ?, url = ?,
                   pdf_url = ?, venue = ?, citation_count = ?, categories = ?, sources = ?,
-                  search_text = ?, updated_at = ?
+                  search_text = ?, updated_at = ?, local_path = ?
                 WHERE key = ?
                 """,
                 (*values, key),
@@ -986,6 +1105,4 @@ class KnowledgeBase:
 
 
 def make_new_key(paper: Paper) -> str:
-    from autopaper.models import make_key
-
     return make_key(paper)

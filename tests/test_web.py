@@ -2,6 +2,7 @@ import json
 import threading
 from pathlib import Path
 from urllib.parse import quote
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
@@ -150,3 +151,76 @@ def test_interface_uploads_reads_and_edits_aliases(server: str):
     assert removed["ok"] is True
     _, empty = _json(server + "/api/highlights")
     assert empty["highlights"] == []
+    _, asked = _json(
+        server + "/api/highlights",
+        json.dumps({
+            "scope": "paper",
+            "scope_id": key,
+            "scope_label": "Alpha Paper",
+            "kind": "annotation",
+            "color": "blue",
+            "comment": "追问：这段在说什么\n这段在讲推广性语言。",
+            "items": [{"paragraph": "推广性语言与资助成功有关。", "selected_text": "推广性语言"}],
+        }).encode("utf-8"),
+        "application/json",
+    )
+    assert asked["highlights"][0]["color"] == "blue"
+    assert asked["highlights"][0]["comment"].startswith("追问：")
+    try:
+        _json(
+            server + "/api/ask",
+            json.dumps({
+                "scope": "paper",
+                "scope_id": key,
+                "question": "meaning",
+                "items": [{"paragraph": "推广性语言与资助成功有关。", "selected_text": "推广性语言"}],
+                "note": "推广性语言与资助成功有关。",
+            }).encode("utf-8"),
+            "application/json",
+        )
+    except HTTPError as exc:
+        assert exc.code == 400
+        assert "API_KEY" in json.loads(exc.read().decode("utf-8"))["error"]
+    else:
+        raise AssertionError("没有密钥时不应完成追问")
+
+
+def test_bibliography_is_recognized_on_upload_and_can_be_edited(server: str):
+    page = urlopen(server + "/").read().decode("utf-8")
+    assert "补全题录" in page
+    script = urlopen(server + "/assets/app.js").read().decode("utf-8")
+    assert "保存题录" in script
+    assert "从原文补全" in script
+    body, content_type = _multipart(
+        {"author": "Huilian Qiu", "topic": "Science of Science"},
+        [(
+            "Seeking Measures.txt",
+            "CHASE '22, May 21–29, 2022 © 2022 Copyright\nhttps://doi.org/10.1145/3528579.3529169\n".encode("utf-8"),
+        )],
+    )
+    status_code, uploaded = _json(server + "/api/upload", body, content_type)
+    assert status_code == 200
+    recognized = uploaded["bibliography"][0]["recognized"]
+    assert recognized["year"] == 2022
+    assert recognized["venue"] == "CHASE"
+    assert recognized["doi"] == "10.1145/3528579.3529169"
+    _, graph = _json(server + "/api/graph")
+    key = graph["papers"][0]["key"]
+    assert graph["papers"][0]["year"] == 2022
+    status_code, saved = _json(
+        server + "/api/paper-meta",
+        json.dumps({"key": key, "year": "1999", "venue": "手改会议", "doi": recognized["doi"], "url": ""}).encode("utf-8"),
+        "application/json",
+    )
+    assert saved["year"] == 1999
+    assert saved["venue"] == "手改会议"
+    assert saved["url"] == "https://doi.org/10.1145/3528579.3529169"
+    _, filled = _json(
+        server + "/api/biblio",
+        json.dumps({"key": key}).encode("utf-8"),
+        "application/json",
+    )
+    assert filled["papers"][0]["year"] == 1999
+    assert "year" not in filled["papers"][0]["filled"]
+    _, paper = _json(server + "/api/paper?key=" + quote(key, safe=""))
+    assert paper["paper"]["venue"] == "手改会议"

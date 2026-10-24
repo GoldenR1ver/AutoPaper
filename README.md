@@ -48,11 +48,11 @@ python -m autopaper report graph-neural-networks-for-time-series
 
 `topic add` 会打印主题 id。之后的命令可以用这个 id，也可以用完整名称。
 
-主题词按字面匹配，标点和大小写会被忽略，所以 `time series` 可以命中 `time-series`。多个 `--keyword` 默认命中任意一个；`--keyword-mode all` 要求全部命中。同义词请分成多个主题词，语义上的相关性交给后面的模型打分。
+主题词按字面匹配，标点和大小写会被忽略，所以 `time series` 可以命中 `time-series`。多个 `--keyword` 默认命中任意一个；`--keyword-mode all` 要求全部命中。字面对不上的同义词，如果配置了 embedding 接口，会按和主题的向量相似度补进候选，并参与后面的排序。没配向量接口时，这些论文仍然进不来，同义词需要分成多个主题词。对话用 DeepSeek、向量用别的服务时，把向量地址和密钥写在 `AUTOPAPER_EMBEDDING_BASE_URL` 和 `AUTOPAPER_EMBEDDING_API_KEY`。
 
 领域标签会在分类、标题、摘要和期刊里做子串匹配。默认 `--domain-mode soft`：论文自己带了分类但一个标签都没命中时才剔除；没有分类的记录会保留。`--domain-mode strict` 则要求标签一定出现。标签建议用自然语言，例如 `machine learning`，不要只写 arXiv 分类号，否则其他数据源上的论文容易被滤掉。
 
-`--min-score` 默认是 0。低于它的论文仍会入库，状态是 `held`，候选导出里默认不出现。模型不可用时，分数来自关键词覆盖、标题命中、被引和年份。模型可用时，只对启发式排序的前 `llm_top_n` 篇重新打分，默认 20 篇，避免一次把整批摘要都送出去。
+`--min-score` 默认是 0。低于它的论文仍会入库，状态是 `held`，候选导出里默认不出现。模型不可用时，分数来自关键词覆盖、标题命中、被引和年份。配置了向量接口时，和主题更相近的论文会用相似度抬高分数，从而进入后面的模型重排。模型可用时，只对排序后的前 `llm_top_n` 篇重新打分，默认 20 篇，避免一次把整批摘要都送出去。
 
 每次收集都会在 `data/exports/<主题 id>/latest/` 写下：
 
@@ -87,6 +87,12 @@ python -m autopaper author list
 
 作者对外显示为主名加括号别名，例如 `Huilian Sophie Qiu（Huilian Qiu / Qiu Huilian / 邱惠莲）`。之后再用别名选择，会指向同一个作者。
 
+上传时会从原文第一页识别年份、期刊或会议、DOI 和链接。识别只用 PDF 文本和文件名，不调用模型。模板 DOI、截断的 DOI 和参考文献里的 DOI 不会写入。识别结果会显示在上传结果里，也可以在论文页随时修改。已经归档的论文可以补上仍然空着的字段：
+
+```powershell
+python -m autopaper biblio
+```
+
 ## 生成结构化笔记
 
 `notes` 会阅读已经归类的本地论文。每篇笔记写在论文自己的目录里：`note.md` 和 `note.json`。同一作者、同一主题再写一份综合笔记，放在 `data/notes/<作者>/<主题>/`，里面有 `index.md`、`synthesis.md` 和 `synthesis.json`。
@@ -105,9 +111,9 @@ python -m autopaper notes --author "Huilian Qiu" --topic "Science of Science wit
 python -m autopaper serve
 ```
 
-浏览器里会打开本机页面。论文按笔记内容的相近程度连线，线越粗越接近；选中一篇后，其他论文按和它的相关度改变大小。左侧可以按作者、主题和相关度筛选。点开论文阅读笔记，点开作者可以增删别名。上传支持多文件或整个文件夹，同名论文会跳过，新论文会自动生成笔记。
+浏览器里会打开本机页面。论文按笔记内容的相近程度连线，线越粗越接近；选中一篇后，其他论文按和它的相关度改变大小。左侧可以按作者、主题和相关度筛选。点开论文阅读笔记，点开作者可以增删别名。上传支持多文件或整个文件夹，同名论文会跳过，新论文会自动生成笔记，并给出从原文识别的年份、期刊或会议、DOI 和链接。打开论文后可以随时改这四项；「补全题录」和「从原文补全」只填写仍然空着的字段。
 
-笔记标题旁会显示更新日期。阅读论文、作者、主题或综合笔记时，可以点「更新笔记」重新调用模型；已有的高亮和批注不会被删掉。在笔记里用鼠标左键划取文字后，可以选择黄、绿、蓝、粉、橙高亮，或写下批注。保存的是所在整段，并写入「我的笔记库」（`data/notes/highlights/library.md`）。
+笔记标题旁会显示更新日期。阅读论文、作者、主题或综合笔记时，可以点「更新笔记」重新调用模型；已有的高亮和批注不会被删掉。在笔记里用鼠标左键划取文字后，可以选择黄、绿、蓝、粉、橙高亮，或写下批注。也可以点「追问」，让模型用两三句话说明这段在说什么、和全文、作者、主题、方法、证据及其他论文的关系，以及还缺什么、术语和能否沿用。回答出来后点「快速保存为笔记」，这段会高亮，回答写进同一条笔记。保存的是所在整段，并写入「我的笔记库」（`data/notes/highlights/library.md`）。
 
 ## 精读一篇论文
 
@@ -165,8 +171,9 @@ schtasks /Create /TN AutoPaper /SC WEEKLY /D MON /ST 09:00 /TR "powershell -NoPr
 | --- | --- |
 | 阅读、打分、综述、研究者提示词 | `src/autopaper/llm/prompts.py` |
 | 新增或调整一个数据源 | `src/autopaper/sources/`，并在 `sources/__init__.py` 注册 |
-| 去重阈值 | `autopaper.yaml` 的 `similarity_threshold`；规则在 `pipeline/dedup.py` |
+| 去重阈值 | `autopaper.yaml` 的 `similarity_threshold`；分桶和规则在 `pipeline/dedup.py` |
 | 关键词和领域标签 | `pipeline/filter.py` |
+| 语义召回 | `pipeline/recall.py`；阈值在 `autopaper.yaml` 的 `recall` |
 | 启发式分数 | `pipeline/rank.py` |
 | 表结构 | `storage/db.py`。新改动追加迁移版本，不要改已经发布的建表语句 |
 | 导出字段 | `storage/export.py` |
@@ -174,7 +181,7 @@ schtasks /Create /TN AutoPaper /SC WEEKLY /D MON /ST 09:00 /TR "powershell -NoPr
 
 数据流是一条直线：数据源把结果收成同一种 `Paper`，去重和过滤之后打分，`KnowledgeBase` 负责合并与保存，导出和报告只读库。数据源失败不会让整次运行中断，结果记在该主题的运行记录里。
 
-SQLite 文件在 `data/autopaper.sqlite`。同一 DOI，或同一规范化标题且标识不冲突的记录，会合并进原有主键，所以重复收集不会把一篇论文存成两条。两个不同 DOI 即使标题一样也会分开，避免把短标题如 “Introduction” 误并。
+SQLite 文件在 `data/autopaper.sqlite`。同一 DOI，或同一规范化标题且标识不冲突的记录，会合成一条，所以重复收集不会把一篇论文存成两条。合并后的主键按 DOI、arXiv、PubMed、OpenAlex、Semantic Scholar、标题这个固定顺序生成，两次收集的到达顺序不同，导出的 key 也相同。两个不同 DOI 即使标题一样也会分开，避免把短标题如 “Introduction” 误并。
 
 ## 参考项目里借用了什么
 

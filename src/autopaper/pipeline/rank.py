@@ -65,10 +65,20 @@ def _coerce_score(value) -> float | None:
     return max(0.0, min(100.0, score))
 
 
-def rank_papers(papers: list[Paper], topic: Topic, llm=None) -> tuple[list[ScoredPaper], int, str | None]:
+def rank_papers(
+    papers: list[Paper],
+    topic: Topic,
+    llm=None,
+    semantic: list[float | None] | None = None,
+) -> tuple[list[ScoredPaper], int, str | None]:
     scored: list[ScoredPaper] = []
-    for paper in papers:
+    for index, paper in enumerate(papers):
         value, reason = heuristic_score(paper, topic)
+        if semantic is not None and index < len(semantic) and semantic[index] is not None:
+            semantic_score = round(max(0.0, min(100.0, semantic[index] * 100)), 1)
+            if semantic_score > value:
+                reason = f"语义相近 {semantic_score:.0f}。{reason}"
+                value = semantic_score
         scored.append(
             ScoredPaper(
                 paper=paper,

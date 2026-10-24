@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from autopaper.analysis.biblio import fill_local_papers, fill_paper, format_recognized, recognize_uploaded, set_bibliography
 from autopaper.analysis.notes import (
     author_profile_path,
     file_updated,
@@ -20,7 +21,8 @@ from autopaper.analysis.notes import (
     write_highlight_library,
 )
 from autopaper.llm.client import LLMClient
-from autopaper.catalog import require_existing_author, resolve_authors, resolve_topics
+from autopaper.llm.prompts import FOLLOWUP_SYSTEM, followup_question, followup_user_prompt
+from autopaper.catalog import format_author, require_existing_author, resolve_authors, resolve_topics
 from autopaper.config import Settings
 from autopaper.errors import AutoPaperError, NotFoundError
 from autopaper.library import plan_uploads, safe_filename, store_uploads
@@ -228,7 +230,8 @@ class LibraryApp:
                 raise AutoPaperError("请选择高亮颜色")
             comment = ""
         else:
-            color = ""
+            if color not in HIGHLIGHT_COLORS:
+                color = ""
             if not comment:
                 raise AutoPaperError("请写下批注")
         raw_items = payload.get("items")
@@ -264,6 +267,112 @@ class LibraryApp:
         write_highlight_library(self.settings.data_dir, rows)
         return {"highlights": saved}
 
+    def ask(self, payload: dict) -> dict:
+        question_id = str(payload.get("question") or "")
+        custom = " ".join(str(payload.get("custom") or "").split())
+        if question_id == "custom":
+            if not custom:
+                raise AutoPaperError("请写下要追问的问题")
+            label = custom[:40]
+            instruction = f"按这个问题回答，仍然只依据给定笔记：{custom[:200]}"
+        else:
+            chosen = followup_question(question_id)
+            if chosen is None:
+                raise AutoPaperError("没有这个问题")
+            label, instruction = chosen
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        paragraphs = []
+        selected = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            paragraph = " ".join(str(item.get("paragraph") or "").split())
+            piece = " ".join(str(item.get("selected_text") or "").split())
+            if paragraph:
+                paragraphs.append(paragraph[:4000])
+            if piece:
+                selected.append(piece[:2000])
+        if not paragraphs and not selected:
+            raise AutoPaperError("请先划取笔记中的段落")
+        scope = str(payload.get("scope") or "")
+        scope_id = str(payload.get("scope_id") or "").strip()
+        context = self._ask_context(scope, scope_id)
+        note = str(payload.get("note") or "").strip() or context["note"]
+        llm = _open_llm(self.settings)
+        if llm is None:
+            raise AutoPaperError("追问需要 OPENAI_API_KEY 或 DEEPSEEK_API_KEY。")
+        try:
+            result = llm.complete_json(
+                FOLLOWUP_SYSTEM,
+                followup_user_prompt(
+                    scope_name=context["scope_name"],
+                    label=str(payload.get("scope_label") or "").strip() or context["label"],
+                    authors=context["authors"],
+                    topics=context["topics"],
+                    instruction=instruction,
+                    selected="\n".join(selected),
+                    paragraphs="\n\n".join(paragraphs),
+                    note=note,
+                ),
+                expect="object",
+                max_tokens=500,
+            )
+        finally:
+            llm.close()
+        answer = ""
+        if isinstance(result, dict):
+            answer = str(result.get("answer") or "").strip()
+        if not answer:
+            raise AutoPaperError("模型没有给出回答")
+        return {"answer": answer, "question": label}
+
+    def _ask_context(self, scope: str, scope_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            self._require_scope(kb, scope, scope_id)
+            if scope == "paper":
+                paper = kb.resolve_paper(scope_id)
+                reading = kb.get_reading(paper.key) or {}
+                authors = "；".join(format_author(author) for author in kb.authors_of_paper(paper.key))
+                topics = "；".join(topic.name for topic in kb.topics_of_paper(paper.key))
+                return {
+                    "scope_name": "论文笔记",
+                    "label": paper.title,
+                    "authors": authors,
+                    "topics": topics,
+                    "note": reading.get("markdown") or "",
+                }
+            if scope == "author":
+                author = require_existing_author(kb, scope_id)
+                path = author_profile_path(self.settings.data_dir, author)
+                return {
+                    "scope_name": "作者笔记",
+                    "label": format_author(author),
+                    "authors": format_author(author),
+                    "topics": "",
+                    "note": path.read_text(encoding="utf-8") if path.exists() else "",
+                }
+            if scope == "topic":
+                topic = kb.get_topic(scope_id)
+                path = topic_profile_path(self.settings.data_dir, topic)
+                return {
+                    "scope_name": "主题笔记",
+                    "label": topic.name,
+                    "authors": "",
+                    "topics": topic.name,
+                    "note": path.read_text(encoding="utf-8") if path.exists() else "",
+                }
+            author_id, _, topic_id = scope_id.partition("|")
+            author = require_existing_author(kb, author_id)
+            topic = kb.get_topic(topic_id)
+            path = synthesis_path(self.settings.data_dir, author, topic)
+            return {
+                "scope_name": "综合笔记",
+                "label": f"{format_author(author)} / {topic.name}",
+                "authors": format_author(author),
+                "topics": topic.name,
+                "note": path.read_text(encoding="utf-8") if path.exists() else "",
+            }
+
     def remove_highlight(self, ident: str) -> dict:
         with self.lock, self._kb() as kb:
             kb.delete_highlight(ident)
@@ -296,9 +405,42 @@ class LibraryApp:
 
             return {"id": author.id, "label": format_author(author), "aliases": author.aliases}
 
+    def fill_bibliography(self, key: str = "", *, all_papers: bool = False) -> dict:
+        with self.lock, self._kb() as kb:
+            if all_papers:
+                records = fill_local_papers(kb)
+            else:
+                paper = kb.resolve_paper(key)
+                if paper is None:
+                    raise NotFoundError(f"没有找到论文：{key}")
+                if not paper.local_path:
+                    raise AutoPaperError("这篇论文没有本地原文，无法从原文补全。")
+                records = [fill_paper(kb, paper, only_missing=True)]
+        return {
+            "papers": records,
+            "count": len(records),
+            "filled_count": sum(1 for item in records if item["filled"]),
+        }
+
+    def save_bibliography(self, key: str, year_raw, venue: str, doi: str, url: str) -> dict:
+        text = str(year_raw or "").strip()
+        year = None
+        if text:
+            if not re.fullmatch(r"\d{4}", text):
+                raise AutoPaperError("年份请填四位数字，或留空。")
+            year = int(text)
+            if not 1900 <= year <= 2030:
+                raise AutoPaperError("年份请填 1900 到 2030 之间的数字，或留空。")
+        with self.lock, self._kb() as kb:
+            paper = kb.resolve_paper(key)
+            if paper is None:
+                raise NotFoundError(f"没有找到论文：{key}")
+            return set_bibliography(kb, paper, year=year, venue=venue, doi=doi, url=url)
+
     def upload(self, fields: dict[str, list[str]], files: list[tuple[str, bytes]]) -> dict:
         if not files:
             raise AutoPaperError("请选择至少一篇 PDF、TXT 或 Markdown。")
+        bibliography: list[dict] = []
         with tempfile.TemporaryDirectory(prefix="autopaper-upload-") as temporary:
             root = Path(temporary)
             used: set[str] = set()
@@ -328,6 +470,7 @@ class LibraryApp:
                         kb.resolve_paper(item.paper_key) for item in planned if not item.skip and item.paper_key
                     ]
                     uploaded_papers = [paper for paper in uploaded_papers if paper is not None]
+                    uploaded_papers, bibliography = recognize_uploaded(kb, uploaded_papers)
         result = {
             "uploaded": [
                 {"title": item.title, "folder": str(item.folder) if item.folder else ""}
@@ -339,6 +482,10 @@ class LibraryApp:
             "topics": [topic.name for topic in topics],
             "notes": [],
             "note_status": "",
+            "bibliography": [
+                {"title": item["title"], "recognized": item["recognized"], "summary": format_recognized(item)}
+                for item in bibliography
+            ],
         }
         if not uploaded_papers:
             return result
@@ -483,12 +630,31 @@ def _handler_class(app: LibraryApp):
             if parsed.path == "/api/highlights":
                 self._json(app.save_highlights(_json_body(body)))
                 return
+            if parsed.path == "/api/ask":
+                self._json(app.ask(_json_body(body)))
+                return
             if parsed.path == "/api/profile":
                 try:
                     payload = json.loads(body.decode("utf-8") or "{}")
                 except json.JSONDecodeError as exc:
                     raise AutoPaperError("笔记请求不是 JSON") from exc
                 self._json(app.write_profile(str(payload.get("kind") or ""), str(payload.get("id") or "")))
+                return
+            if parsed.path == "/api/biblio":
+                payload = _json_body(body)
+                self._json(app.fill_bibliography(str(payload.get("key") or ""), all_papers=bool(payload.get("all"))))
+                return
+            if parsed.path == "/api/paper-meta":
+                payload = _json_body(body)
+                self._json(
+                    app.save_bibliography(
+                        str(payload.get("key") or ""),
+                        payload.get("year"),
+                        str(payload.get("venue") or ""),
+                        str(payload.get("doi") or ""),
+                        str(payload.get("url") or ""),
+                    )
+                )
                 return
             if parsed.path == "/api/alias":
                 payload = _json_body(body)

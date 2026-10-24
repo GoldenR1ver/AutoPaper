@@ -10,6 +10,7 @@ import click
 import typer
 
 from autopaper import __version__
+from autopaper.analysis.biblio import fill_local_papers, format_recognized, recognize_uploaded
 from autopaper.analysis.notes import (
     generate_author_profile,
     generate_topic_profile,
@@ -228,6 +229,10 @@ def doctor_cmd(
             typer.echo(f"模型：{settings.llm_model} @ {settings.llm_base_url}")
         else:
             typer.echo("未启用模型。检索和启发式排序仍可用，精读与摘要打分需要 OPENAI_API_KEY。")
+        if settings.embedding_model and settings.embedding_api_key and not settings.disable_llm:
+            typer.echo(f"语义召回：{settings.embedding_model} @ {settings.embedding_base_url}")
+        else:
+            typer.echo("未启用语义召回。字面主题词没命中的论文不会补进候选。")
         typer.echo("数据源：" + "、".join(available_source_names()))
         with open_kb(settings) as kb:
             typer.echo(f"主题 {len(kb.list_topics())} 个，库文件已就绪。")
@@ -556,7 +561,10 @@ def upload_cmd(
                 planned = store_uploads(planned, kb, authors, topics)
                 uploaded = [kb.resolve_paper(item.paper_key) for item in planned if not item.skip and item.paper_key]
                 uploaded = [paper for paper in uploaded if paper is not None]
+                uploaded, records = recognize_uploaded(kb, uploaded)
             typer.echo(format_upload_report(planned, authors, topics))
+            for record in records if incoming else []:
+                typer.echo(f"{record['title']}  {format_recognized(record)}")
             if uploaded:
                 llm = maybe_llm(settings)
                 if llm is None:
@@ -566,6 +574,19 @@ def upload_cmd(
                         note_papers(kb, settings.data_dir, llm, uploaded, echo=typer.echo)
                     finally:
                         llm.close()
+
+
+@app.command("biblio")
+def biblio_cmd(ctx: typer.Context) -> None:
+    """从已归档论文原文识别年份、期刊或会议、DOI 和链接。只补空白字段，不调用模型。"""
+    with cli_errors():
+        settings = settings_from(ctx)
+        with open_kb(settings) as kb:
+            records = fill_local_papers(kb)
+        filled = sum(1 for record in records if record["filled"])
+        for record in records:
+            typer.echo(f"{record['title']}  {format_recognized(record)}")
+        typer.echo(f"已检查 {len(records)} 篇，写入 {filled} 篇原先空着的题录。")
 
 
 @author_app.command("list")

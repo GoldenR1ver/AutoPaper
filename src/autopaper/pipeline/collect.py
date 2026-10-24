@@ -6,9 +6,11 @@ from dataclasses import asdict, dataclass, field
 from autopaper.analysis.report import write_topic_report
 from autopaper.errors import SourceError
 from autopaper.models import Topic
+from autopaper.llm.client import maybe_embedder
 from autopaper.pipeline.dedup import deduplicate
 from autopaper.pipeline.filter import filter_papers
 from autopaper.pipeline.rank import rank_papers
+from autopaper.pipeline.recall import apply_recall
 from autopaper.storage.db import KnowledgeBase
 from autopaper.storage.export import export_topic_bundle
 
@@ -29,12 +31,22 @@ class CollectStats:
     dropped_domain: int = 0
     stored_count: int = 0
     candidate_count: int = 0
+    recalled_count: int = 0
     llm_scored: int = 0
     export_dir: str = ""
     report_path: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _embedder_for(settings, llm):
+    if llm is not None and callable(getattr(llm, "embed", None)):
+        return llm, False
+    if getattr(settings, "disable_llm", False):
+        return None, False
+    embedder = maybe_embedder(settings)
+    return embedder, embedder is not None
 
 
 def format_stats(stats: CollectStats) -> str:
@@ -44,7 +56,7 @@ def format_stats(stats: CollectStats) -> str:
         f"检索：{fetched}",
         (
             f"合计 {stats.raw_count} 篇，去重后 {stats.deduped_count} 篇，"
-            f"过滤后 {stats.filtered_count} 篇"
+            f"过滤后 {stats.filtered_count} 篇（语义召回 {stats.recalled_count} 篇）"
         ),
         (
             f"过滤明细：排除词 {stats.dropped_exclude}，主题词未命中 {stats.dropped_keyword}，"
@@ -103,7 +115,22 @@ def run_collect(
 
     deduped = deduplicate(raw, settings.similarity_threshold)
     filtered = filter_papers(deduped, topic)
-    ranked, llm_count, warning = rank_papers(filtered.kept, topic, llm)
+    embedder, owned_embedder = _embedder_for(settings, llm)
+    try:
+        recalled = apply_recall(
+            filtered,
+            topic,
+            embedder,
+            min_similarity=float(getattr(settings, "recall_similarity", 0.42)),
+            limit=int(getattr(settings, "recall_limit", 30)),
+            embed_limit=int(getattr(settings, "recall_embed_limit", 400)),
+        )
+    finally:
+        if owned_embedder and embedder is not None:
+            embedder.close()
+    if recalled.warning:
+        errors.append(recalled.warning)
+    ranked, llm_count, warning = rank_papers(recalled.papers, topic, llm, recalled.semantic)
     if warning:
         errors.append(warning)
     if fresh:
@@ -157,12 +184,13 @@ def run_collect(
         errors=errors,
         raw_count=len(raw),
         deduped_count=len(deduped),
-        filtered_count=len(filtered.kept),
+        filtered_count=len(recalled.papers),
         dropped_exclude=filtered.dropped_exclude,
-        dropped_keyword=filtered.dropped_keyword,
+        dropped_keyword=max(0, filtered.dropped_keyword - recalled.recalled),
         dropped_domain=filtered.dropped_domain,
         stored_count=stored,
         candidate_count=candidates,
+        recalled_count=recalled.recalled,
         llm_scored=llm_count,
         export_dir=export_dir,
         report_path=report_path,

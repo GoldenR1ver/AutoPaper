@@ -16,6 +16,7 @@ const state = {
   jumpHighlight: "",
   pendingSelection: null,
   updating: false,
+  biblioNotice: "",
 };
 
 const canvas = document.querySelector("#graph");
@@ -40,6 +41,7 @@ document.querySelector("#clear-topics").onclick = () => { state.topics.clear(); 
 document.querySelector("#reset-layout").onclick = () => { state.positions.clear(); layout(true); draw(); };
 document.querySelector("#reader-close").onclick = closeReader;
 document.querySelector("#library-open").onclick = openLibrary;
+document.querySelector("#fill-biblio").onclick = fillAllBibliography;
 document.querySelector("#upload-open").onclick = openUpload;
 document.querySelector("#upload-close").onclick = () => document.querySelector("#upload-dialog").close();
 document.querySelector("#files").onchange = updateFileLabel;
@@ -593,7 +595,14 @@ async function showPaper(key, body, fileLink) {
     : "";
   const markdown = payload.markdown || fallbackNote(payload);
   state.noteMarkdown = markdown;
-  body.innerHTML = `${synthesisBlock}<article class="note">${renderMarkdown(markdown)}</article><h2>相关论文</h2><div class="related" id="related"></div>`;
+  body.innerHTML = `${synthesisBlock}${biblioForm(payload.paper)}<article class="note">${renderMarkdown(markdown)}</article><h2>相关论文</h2><div class="related" id="related"></div>`;
+  const form = body.querySelector("#biblio-form");
+  form.onsubmit = (event) => saveBibliography(event, key);
+  body.querySelector("#biblio-fill").onclick = () => fillBibliography(key);
+  if (state.biblioNotice) {
+    body.querySelector("#biblio-message").textContent = state.biblioNotice;
+    state.biblioNotice = "";
+  }
   await mountNote(
     body.querySelector("article.note"),
     { scope: "paper", id: key, label: payload.paper.title },
@@ -618,6 +627,92 @@ async function showPaper(key, body, fileLink) {
     button.querySelector("span").textContent = `${item.reason} · ${item.weight}`;
     button.onclick = () => inspect({ kind: "paper", id: item.key }, true);
     related.appendChild(button);
+  }
+}
+
+function biblioForm(paper) {
+  return `<form id="biblio-form" class="biblio">
+    <label>年份<input name="year" inputmode="numeric" value="${escapeAttr(paper.year || "")}" /></label>
+    <label>期刊或会议<input name="venue" value="${escapeAttr(paper.venue || "")}" /></label>
+    <label>DOI<input name="doi" value="${escapeAttr(paper.doi || "")}" /></label>
+    <label>链接<input name="url" value="${escapeAttr(paper.url || "")}" /></label>
+    <div class="biblio-actions">
+      <button type="submit" class="primary">保存题录</button>
+      <button type="button" id="biblio-fill">从原文补全</button>
+    </div>
+    <p id="biblio-message" class="meta-line">链接留空且写了 DOI 时，会保存成 doi.org 链接。从原文补全只填写空着的字段。</p>
+  </form>`;
+}
+
+function escapeAttr(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+async function saveBibliography(event, key) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = form.querySelector("#biblio-message");
+  message.textContent = "正在保存…";
+  const response = await fetch("/api/paper-meta", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      key,
+      year: form.year.value.trim(),
+      venue: form.venue.value.trim(),
+      doi: form.doi.value.trim(),
+      url: form.url.value.trim(),
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    message.textContent = payload.error || "没有保存";
+    return;
+  }
+  state.biblioNotice = "已保存。笔记开头的题录已改，笔记更新日期不变。";
+  await load();
+  await showPaper(key, document.querySelector("#reader-body"), document.querySelector("#open-file"));
+}
+
+async function fillBibliography(key) {
+  const message = document.querySelector("#biblio-message");
+  if (message) message.textContent = "正在从原文读取…";
+  const response = await fetch("/api/biblio", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    if (message) message.textContent = payload.error || "没有补全";
+    return;
+  }
+  const found = (payload.papers[0] && payload.papers[0].recognized) || {};
+  state.biblioNotice = `原文识别：年份 ${found.year || "未识别"}，期刊或会议 ${found.venue || "未识别"}，DOI ${found.doi || "未识别"}，链接 ${found.url || "未识别"}。空着的字段已写入。`;
+  await load();
+  await showPaper(key, document.querySelector("#reader-body"), document.querySelector("#open-file"));
+}
+
+async function fillAllBibliography() {
+  const button = document.querySelector("#fill-biblio");
+  const status = document.querySelector("#graph-status");
+  button.disabled = true;
+  status.textContent = "正在从原文补全题录…";
+  const response = await fetch("/api/biblio", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ all: true }),
+  });
+  const payload = await response.json();
+  button.disabled = false;
+  if (!response.ok) {
+    status.textContent = payload.error || "没有补全";
+    return;
+  }
+  await load();
+  status.textContent = `已检查 ${payload.count} 篇，写入了 ${payload.filled_count} 篇原先空着的题录。`;
+  if (state.focus && state.focus.kind === "paper") {
+    await showPaper(state.focus.id, document.querySelector("#reader-body"), document.querySelector("#open-file"));
   }
 }
 
@@ -844,8 +939,9 @@ async function submitUpload(event) {
   const payload = await response.json();
   if (!response.ok) { message.className = "message error"; message.textContent = payload.error || "上传失败"; return; }
   const noteStatus = payload.note_status ? ` ${payload.note_status}` : "";
+  const recognized = (payload.bibliography || []).map((item) => `${item.title}：${item.summary || ""}`).join("\n");
   message.className = payload.note_status && payload.note_status.includes("失败") ? "message error" : "message ok";
-  message.textContent = `上传 ${payload.uploaded.length} 篇，跳过 ${payload.skipped.length} 篇。${noteStatus}`;
+  message.textContent = `上传 ${payload.uploaded.length} 篇，跳过 ${payload.skipped.length} 篇。${noteStatus}${recognized ? `\n${recognized}` : ""}`;
   document.querySelector("#files").value = "";
   document.querySelector("#folder").value = "";
   updateFileLabel();
@@ -855,16 +951,43 @@ async function submitUpload(event) {
 document.querySelector("#reader-body").addEventListener("mouseup", onNoteMouseUp);
 document.querySelector("#reader").addEventListener("scroll", hideSelectMenu);
 document.querySelector("#select-menu").addEventListener("mousedown", (event) => {
-  if (event.target.closest("textarea")) return;
+  if (event.target.closest("textarea, input")) return;
   event.preventDefault();
 });
 for (const button of document.querySelectorAll("#select-menu .color-dot")) {
   button.onclick = () => persistHighlight("highlight", button.dataset.color, "");
 }
 document.querySelector("#select-annotate").onclick = () => {
+  document.querySelector("#ask-box").hidden = true;
   document.querySelector("#annotate-box").hidden = false;
   document.querySelector("#annotate-text").focus();
 };
+document.querySelector("#select-ask").onclick = openAsk;
+document.querySelector("#ask-custom-send").onclick = () => askFollowup("custom");
+document.querySelector("#ask-custom").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") askFollowup("custom");
+});
+document.querySelector("#ask-save").onclick = saveAskNote;
+const ASK_QUESTIONS = [
+  ["meaning", "这段在说什么"],
+  ["whole", "和全文的关系"],
+  ["author", "和作者的关系"],
+  ["topic", "和主题的关系"],
+  ["method", "方法能支持什么"],
+  ["evidence", "主张和证据"],
+  ["gap", "还缺什么"],
+  ["corpus", "和其他论文的关系"],
+  ["term", "术语"],
+  ["reproduce", "能否沿用"],
+];
+for (const [ident, label] of ASK_QUESTIONS) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chip";
+  button.textContent = label;
+  button.onclick = () => askFollowup(ident);
+  document.querySelector("#ask-questions").appendChild(button);
+}
 document.querySelector("#annotate-save").onclick = () => {
   const comment = document.querySelector("#annotate-text").value.trim();
   if (!comment) return;
@@ -881,6 +1004,7 @@ function hideSelectMenu() {
   if (!menu) return;
   menu.hidden = true;
   document.querySelector("#annotate-box").hidden = true;
+  document.querySelector("#ask-box").hidden = true;
 }
 
 function onNoteMouseUp(event) {
@@ -902,12 +1026,81 @@ function onNoteMouseUp(event) {
   }
   if (!parts.length) return;
   state.pendingSelection = { parts };
-  const rect = range.getBoundingClientRect();
-  const menu = document.querySelector("#select-menu");
+  state.askLabel = "";
+  state.askAnswer = "";
   document.querySelector("#annotate-box").hidden = true;
+  document.querySelector("#ask-box").hidden = true;
+  document.querySelector("#ask-answer").textContent = "";
+  document.querySelector("#ask-save").disabled = true;
+  placeMenu(range.getBoundingClientRect());
+}
+
+function placeMenu(rect) {
+  const menu = document.querySelector("#select-menu");
   menu.hidden = false;
-  menu.style.left = `${Math.min(window.innerWidth - 280, Math.max(8, rect.left))}px`;
-  menu.style.top = `${Math.max(8, rect.bottom + 8)}px`;
+  const width = Math.min(440, window.innerWidth - 16);
+  let left = Math.max(8, rect.left);
+  if (left + width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - width - 8);
+  let top = rect.bottom + 8;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  const height = menu.offsetHeight;
+  if (top + height > window.innerHeight - 8) {
+    menu.style.top = `${Math.max(8, rect.top - height - 8)}px`;
+  }
+}
+
+function openAsk() {
+  document.querySelector("#annotate-box").hidden = true;
+  document.querySelector("#ask-box").hidden = false;
+  document.querySelector("#ask-answer").textContent = state.askAnswer || "选择一个问题，或写下自己的问题。";
+  document.querySelector("#ask-save").disabled = !state.askAnswer;
+  nudgeMenu();
+}
+
+function nudgeMenu() {
+  const menu = document.querySelector("#select-menu");
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth - 8) menu.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+  if (rect.bottom > window.innerHeight - 8) menu.style.top = `${Math.max(8, window.innerHeight - rect.height - 8)}px`;
+}
+
+async function askFollowup(question) {
+  if (!state.pendingSelection || !state.noteScope) return;
+  const custom = document.querySelector("#ask-custom").value.trim();
+  if (question === "custom" && !custom) return;
+  const answer = document.querySelector("#ask-answer");
+  answer.textContent = "正在追问…";
+  document.querySelector("#ask-save").disabled = true;
+  const response = await fetch("/api/ask", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      scope: state.noteScope.scope,
+      scope_id: state.noteScope.id,
+      scope_label: state.noteScope.label,
+      question,
+      custom,
+      items: state.pendingSelection.parts,
+      note: state.noteMarkdown,
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    state.askAnswer = "";
+    answer.textContent = payload.error || "没有得到回答";
+    return;
+  }
+  state.askLabel = payload.question || "追问";
+  state.askAnswer = payload.answer || "";
+  answer.textContent = state.askAnswer;
+  document.querySelector("#ask-save").disabled = !state.askAnswer;
+  nudgeMenu();
+}
+
+function saveAskNote() {
+  if (!state.askAnswer) return;
+  persistHighlight("annotation", "blue", `追问：${state.askLabel}\n${state.askAnswer}`);
 }
 
 function textInside(block, range) {
@@ -1024,7 +1217,7 @@ function wrapExact(root, needle, item) {
       range.setStart(node, index);
       range.setEnd(node, index + needle.length);
       const mark = document.createElement("mark");
-      mark.className = item.kind === "annotation" ? "hl hl-note" : `hl hl-${item.color || "yellow"}`;
+      mark.className = item.color ? `hl hl-${item.color}` : (item.kind === "annotation" ? "hl hl-note" : "hl hl-yellow");
       mark.dataset.highlightId = item.id;
       range.surroundContents(mark);
       return true;
@@ -1079,7 +1272,8 @@ function renderLibrary(body, highlights) {
       const swatch = document.createElement("i");
       swatch.className = `swatch color-dot ${item.color || "orange"}`;
       const label = document.createElement("strong");
-      label.textContent = `${item.scope_label || "未命名"} · ${item.kind === "annotation" ? "批注" : (colors[item.color] || "高亮")}`;
+      const kindLabel = String(item.comment || "").startsWith("追问：") ? "追问" : (item.kind === "annotation" ? "批注" : (colors[item.color] || "高亮"));
+      label.textContent = `${item.scope_label || "未命名"} · ${kindLabel}`;
       title.append(swatch, label);
       const paragraph = document.createElement("p");
       paragraph.textContent = item.paragraph;

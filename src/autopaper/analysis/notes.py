@@ -92,7 +92,10 @@ def write_highlight_library(data_dir: Path, rows: list[dict]) -> Path:
         for label, group in owners.items():
             lines.extend([f"### {label}", ""])
             for item in group:
-                if item.get("kind") == "annotation":
+                comment = str(item.get("comment") or "")
+                if comment.startswith("追问："):
+                    kind = "追问"
+                elif item.get("kind") == "annotation":
                     kind = "批注"
                 else:
                     kind = f"高亮（{colors.get(str(item.get('color') or ''), item.get('color') or '未标色')}）"
