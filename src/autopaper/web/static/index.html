@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AutoPaper</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <header>
+      <div class="brand">
+        <span class="mark" aria-hidden="true">Ap</span>
+        <div>
+          <strong>AutoPaper</strong>
+          <p>按相关度整理、阅读和上传</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="mode" role="tablist">
+          <button type="button" id="mode-papers" class="active" role="tab">论文相关</button>
+          <button type="button" id="mode-network" role="tab">知识网络</button>
+        </div>
+        <button type="button" id="library-open">我的笔记库</button>
+        <button type="button" class="primary" id="upload-open">上传论文</button>
+      </div>
+    </header>
+    <aside class="rail">
+      <label class="search">
+        <span>搜索</span>
+        <input id="query" type="search" placeholder="标题或一句话" />
+      </label>
+      <label class="slider-row">
+        <span>相关度</span>
+        <input id="min-weight" type="range" min="0" max="90" value="40" />
+        <output id="min-weight-label">40</output>
+      </label>
+      <section>
+        <div class="section-head"><h2>作者</h2><button type="button" id="clear-authors" class="text">清空</button></div>
+        <div id="author-filters" class="chips"></div>
+      </section>
+      <section>
+        <div class="section-head"><h2>主题</h2><button type="button" id="clear-topics" class="text">清空</button></div>
+        <div id="topic-filters" class="chips"></div>
+      </section>
+      <section class="list-section">
+        <div class="section-head">
+          <h2 id="list-title">论文</h2>
+          <button type="button" id="reset-layout" class="text">重排</button>
+        </div>
+        <div id="profile-actions" class="chips"></div>
+        <div id="paper-list" class="paper-list"></div>
+      </section>
+    </aside>
+    <main>
+      <canvas id="graph"></canvas>
+      <div class="hud">
+        <p id="graph-status"></p>
+        <div class="legend">
+          <span><i class="swatch paper"></i>论文</span>
+          <span><i class="swatch author"></i>作者</span>
+          <span><i class="swatch topic"></i>主题</span>
+          <span>绿线越粗，笔记越接近；细线表示同一作者或主题</span>
+        </div>
+      </div>
+      <p id="graph-empty" hidden>库里还没有论文。点右上角上传后，它们会按相关度出现在图上。</p>
+    </main>
+    <aside class="reader" id="reader" hidden>
+      <div class="reader-bar">
+        <button type="button" id="reader-close">关闭</button>
+        <span id="note-updated"></span>
+        <span class="reader-actions">
+          <button type="button" id="update-note" hidden>更新笔记</button>
+          <a id="open-file" hidden target="_blank" rel="noreferrer">打开原文</a>
+        </span>
+      </div>
+      <div id="reader-body"></div>
+    </aside>
+  </div>
+
+  <dialog id="upload-dialog">
+    <form id="upload-form" method="dialog">
+      <header>
+        <h2>上传论文</h2>
+        <button type="button" id="upload-close" class="text">关闭</button>
+      </header>
+      <label class="drop">
+        <input id="files" type="file" multiple accept=".pdf,.txt,.md,.markdown,application/pdf,text/plain,text/markdown" />
+        <input id="folder" type="file" webkitdirectory directory multiple />
+        <span id="file-label">选择文件，或选择整个文件夹。同名论文会自动跳过。</span>
+      </label>
+      <fieldset>
+        <legend>作者</legend>
+        <div id="upload-authors" class="chips"></div>
+        <input id="new-author" type="text" placeholder="新作者主名，多项用 ; 隔开" />
+      </fieldset>
+      <fieldset>
+        <legend>研究主题</legend>
+        <div id="upload-topics" class="chips"></div>
+        <input id="new-topic" type="text" placeholder="新主题，多项用 ; 隔开" />
+      </fieldset>
+      <p class="hint">点选已有作者或主题。别名在图里点开作者后调整。新论文归类后会自动生成笔记，同名论文会跳过。</p>
+      <p id="upload-message" class="message"></p>
+      <div class="dialog-actions">
+        <button type="submit" class="primary" id="upload-submit">开始上传</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="select-menu" hidden>
+    <button type="button" class="color-dot yellow" data-color="yellow" title="黄色高亮"></button>
+    <button type="button" class="color-dot green" data-color="green" title="绿色高亮"></button>
+    <button type="button" class="color-dot blue" data-color="blue" title="蓝色高亮"></button>
+    <button type="button" class="color-dot pink" data-color="pink" title="粉色高亮"></button>
+    <button type="button" class="color-dot orange" data-color="orange" title="橙色高亮"></button>
+    <button type="button" id="select-annotate" class="text">批注</button>
+    <div id="annotate-box" hidden>
+      <textarea id="annotate-text" placeholder="写下批注"></textarea>
+      <button type="button" class="primary" id="annotate-save">保存</button>
+    </div>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

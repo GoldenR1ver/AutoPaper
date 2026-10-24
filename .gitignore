@@ -1,0 +1,61 @@
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+*.egg
+
+# --- 测试与类型检查缓存 ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+
+# --- 密钥与本机配置（示例文件要入库） ---
+.env
+.env.*
+!.env.example
+autopaper.yaml
+*.local.yaml
+
+# --- 运行时数据：知识库、笔记、日志、下载的 PDF ---
+/data/
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# --- 本地论文原文，不进版本库 ---
+/papers/
+*.pdf
+
+# --- 对照用的第三方项目，各自有独立仓库 ---
+/Reference project/
+
+# --- 编辑器与系统 ---
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

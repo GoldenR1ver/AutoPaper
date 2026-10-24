@@ -1,0 +1,26 @@
+# AutoPaper 本地配置。复制为 autopaper.yaml 后按需修改。
+# API 密钥放在 .env 或环境变量里，不要写进这个文件。
+
+data_dir: data
+
+# 填真实邮箱后，OpenAlex 和 Crossref 会把请求放进礼貌池。
+mailto: you@example.com
+
+# 标题去重相似度，0-100。越高越不容易把两篇论文并成一篇。
+similarity_threshold: 92
+
+llm:
+  # 任何兼容 OpenAI Chat Completions 的服务都可以。
+  # DeepSeek 示例：base_url 改为 https://api.deepseek.com ，model 改为 deepseek-chat
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  temperature: 0.2
+
+sources:
+  timeout_seconds: 40
+  arxiv_delay_seconds: 3
+  ncbi_delay_seconds: 0.4
+  default_delay_seconds: 0.3
+  s2_delay_seconds: 1
+
+disable_llm: false
