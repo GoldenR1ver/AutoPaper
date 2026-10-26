@@ -16,13 +16,35 @@ def load_document(path: Path) -> str:
         raise NotFoundError(f"找不到文件：{path}")
     if path.suffix.lower() == ".pdf":
         return extract_pdf(path)
+    return _read_text(path)
+
+
+def load_catalog_source(path: Path) -> tuple[str, str]:
+    """返回正文，以及 PDF 元数据里的作者。归类时用作者栏，不把全文交给模型。"""
+    if not path.exists():
+        raise NotFoundError(f"找不到文件：{path}")
+    if path.suffix.lower() != ".pdf":
+        return _read_text(path), ""
+    reader = _open_pdf(path)
+    author = ""
+    meta = reader.metadata
+    if meta is not None and meta.author:
+        author = str(meta.author)
+    return _pdf_pages(reader), author
+
+
+def extract_pdf(path: Path) -> str:
+    return _pdf_pages(_open_pdf(path))
+
+
+def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise AutoPaperError(f"无法读取文件：{exc}") from exc
 
 
-def extract_pdf(path: Path) -> str:
+def _open_pdf(path: Path):
     try:
         from pypdf import PdfReader
     except ImportError as exc:
@@ -31,9 +53,16 @@ def extract_pdf(path: Path) -> str:
         reader = PdfReader(str(path))
         if reader.is_encrypted:
             raise AutoPaperError("这份 PDF 已加密，无法提取文本")
-        pages = [page.extract_text() or "" for page in reader.pages]
     except AutoPaperError:
         raise
+    except Exception as exc:
+        raise AutoPaperError(f"无法读取 PDF：{exc}") from exc
+    return reader
+
+
+def _pdf_pages(reader) -> str:
+    try:
+        pages = [page.extract_text() or "" for page in reader.pages]
     except Exception as exc:
         raise AutoPaperError(f"无法读取 PDF：{exc}") from exc
     return "\n\n".join(pages)

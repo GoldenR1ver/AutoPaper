@@ -60,6 +60,7 @@ header {
 .mode button.active { background: white; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
 .primary { background: var(--green); color: white; }
 .text { color: var(--muted); padding-inline: 6px; }
+.text.danger { color: #9a2d2d; }
 
 .rail, .reader { min-height: 0; overflow: auto; padding: 16px; }
 .rail { border-width: 0 1px 0 0; display: flex; flex-direction: column; gap: 16px; }
@@ -74,11 +75,14 @@ header {
 #min-weight { grid-column: 1 / -1; }
 #min-weight-label { grid-column: 3; grid-row: 1; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip-wrap { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; }
+.chip-wrap .text { font-size: 0.75rem; }
 .chip {
   border: 1px solid var(--line); background: white; border-radius: 999px;
   padding: 4px 10px; max-width: 100%; text-align: left;
 }
 .chip.on { background: var(--green-soft); border-color: #b7d7c6; color: #145237; }
+.chip.suggested { border-style: dashed; }
 .paper-list { display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
 .paper-row {
   width: 100%; text-align: left; border: 1px solid transparent; background: transparent;
@@ -111,7 +115,25 @@ main { position: relative; min-width: 0; min-height: 0; }
 .reader-actions { display: flex; align-items: center; gap: 8px; }
 #note-updated { flex: 1; color: var(--muted); font-size: 0.78rem; }
 .reader-bar a { color: var(--green); }
-#update-note { border: 1px solid var(--line); background: white; }
+#update-note, #open-file-toggle { border: 1px solid var(--line); background: white; }
+.open-file { position: relative; }
+#open-file-toggle { color: var(--green); }
+#open-file-toggle::after { content: " ▾"; font-size: 0.75em; }
+.open-file-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 6;
+  min-width: 11.5rem; display: flex; flex-direction: column; gap: 2px;
+  padding: 6px; background: white; border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(48, 36, 20, 0.12);
+}
+.open-file-menu[hidden] { display: none; }
+.open-file-menu a, .open-file-menu button {
+  display: block; width: 100%; text-align: left; border: 0; border-radius: 8px;
+  background: transparent; padding: 8px 10px; color: var(--ink); text-decoration: none; white-space: nowrap;
+}
+.open-file-menu a:hover, .open-file-menu button:hover { background: var(--green-soft); }
+.open-file-status { margin: 4px 8px 2px; max-width: 16rem; color: var(--muted); font-size: 0.75rem; line-height: 1.45; }
+#open-file-annotate[hidden] { display: none; }
+#open-file-annotate:disabled { opacity: 0.55; }
 .note { font-family: "Palatino Linotype", "Songti SC", "SimSun", serif; line-height: 1.65; }
 .note h1 { font-size: 1.35rem; line-height: 1.35; margin: 0 0 8px; }
 .note h2 { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 0.95rem; margin: 1.1rem 0 0.35rem; letter-spacing: 0; }
@@ -123,15 +145,26 @@ main { position: relative; min-width: 0; min-height: 0; }
 .meta-line { color: var(--muted); font-size: 0.85rem; }
 .alias-row { display: flex; gap: 8px; margin-top: 10px; }
 .alias-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-.alias-list div { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.alias-list div, .relation-line { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.relation-form { display: flex; gap: 8px; align-items: center; margin: 8px 0 14px; }
+.relation-form select { flex: 1; min-width: 0; }
+.relation-line button.text { width: auto; }
 
 dialog {
-  width: min(560px, calc(100vw - 32px)); border: 0; border-radius: 18px; padding: 0; box-shadow: var(--shadow);
+  width: min(680px, calc(100vw - 32px)); border: 0; border-radius: 18px; padding: 0; box-shadow: var(--shadow);
 }
 dialog::backdrop { background: rgba(28, 25, 21, 0.35); }
-dialog form { padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+dialog form { padding: 18px; display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 48px); overflow: auto; }
+#upload-papers { display: flex; flex-direction: column; gap: 10px; }
+.upload-paper { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: #fffdf8; }
+.upload-paper h3 { margin: 0; font-size: 0.95rem; overflow-wrap: anywhere; }
+.upload-paper input {
+  width: 100%; border: 1px solid var(--line); background: white; border-radius: 10px; padding: 8px 10px; margin-top: 6px;
+}
 dialog header { display: flex; justify-content: space-between; align-items: center; }
 dialog h2 { font-size: 1.15rem; }
+.dedupe-group { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.dedupe-group p { margin: 4px 0; }
 fieldset { border: 1px solid var(--line); border-radius: 12px; }
 .drop {
   display: grid; gap: 8px; padding: 14px; border: 1px dashed #c8bba8; border-radius: 12px; background: #faf7f1;

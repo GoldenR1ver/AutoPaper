@@ -236,6 +236,92 @@ def parse_json_payload(text: str):
         raise LLMError("模型返回的 JSON 无法解析") from exc
 
 
+ANNOTATE_SYSTEM = """你是严谨的论文批注助手。只标出给定论文文本里真实出现的原句或术语。
+quote 必须从论文文本连续抄出，不要改写、不要用省略号、不要拼接不相邻的句子。
+文本里没有的内容不要编造条目。论文没写的数字、系数和阈值不要写成论文的结果。
+通用知识必须标明：范围用“通用标准：”，计算用“通用定义：”，指标的一般作用用“通用作用：”，对数值的一般解读用“通常意味着：”。
+使用简体中文写说明。
+只输出一个 JSON 对象，不要使用 Markdown 围栏。"""
+
+
+def annotate_user_prompt(text: str) -> str:
+    return f"""请按精读习惯，为下面的论文原文挑选需要高亮的片段。每条的 quote 必须能在原文中逐字找到。不要输出 metric，指标另一次处理。
+
+种类 kind 只能是：
+- keyword：概念名、构念、方法专名、效度或统计量的名称。只标术语本身，大约两到六个词，不要整句。
+- definition：论文自己的定义、操作化定义，以及量表怎么划分、选项、目标人群、计分规则。quote 要能看出在定义哪一个概念，不要只标 optional 这种单词。note 用一句话复述它界定了什么。
+- related：被引用的前人、理论、指南、推荐阈值或推荐做法。note 只写原文里它和本论文的关系；原文没写关系就写“论文文本未说明”。
+- method：具体做了什么，包括谁来做、多少人、哪一步、如何分组、如何计分。不要把结果句标成方法。
+- conclusion：研究目的、结果、对结果的解释、贡献。包括表明、支持、证实、预测了、贡献是。不要把背景句标成结论。
+- design_reason：为什么这样定义、分组、旋转、措辞或设置选项。note 复述这个原因。
+- limitation：论文承认的边界、没做的检验、样本或措辞带来的限制。note 用一句话写清限制的是什么。
+
+同一段文字只使用一种 kind。关键词和它的定义句要分开标。
+数量上限：keyword 20，definition 12，related 10，method 10，conclusion 12，design_reason 8，limitation 8。短文少标，不要为了凑数去标无关句。
+
+论文文本：
+{text}
+
+输出 JSON 对象，键为 items。items 是对象数组，每个对象包含 kind、quote、note。note 在 keyword、method、conclusion 上可以是空字符串。"""
+
+
+def annotate_metric_prompt(text: str) -> str:
+    return f"""请只批注这篇论文在分析、实验结果和表格里实际使用的指标。每条 kind 必须是 metric，quote 必须能在原文中逐字找到。
+
+要覆盖的内容：拟合指数、信度、因子载荷、相关、区分效度、取样充分性、显著性检验，以及其他被论文用来支持结论的统计量。普通单词不要标。
+同一指标多次出现时，quote 选带有论文数值或论文解释的那一处，优先选结果和表格，不要选文献综述里第一次出现的名字。
+一段里有多个指标就拆成多条，每条 quote 尽量只包含一个指标和它旁边的数值。表格里的指标名和数字也要标。
+最多 14 条。
+
+每条包含：
+- why：论文为什么用它。论文没写原因时，以“通用作用：”开头说明它在这类分析里做什么。
+- range：取值范围和常用好坏标准。论文写了就按论文写。论文没写就以“通用标准：”开头。不要把通用阈值说成论文自己的标准。
+- finding：先复述原文中的数值，以及原文对这个数值的解释。再以“通常意味着：”开头，用一句话说明按通用标准这个数值通常反映什么特征。原文没有数字就写“论文文本未说明”，不要编造数字。
+- calculation：论文给了公式或算法就按论文写。没给就以“通用定义：”开头。不要编造系数。无法确定就写“论文文本未说明”。
+- measures：这个指标一般用来衡量什么特征。
+
+格式例子只说明字段怎么写，不要把例子里的数字写进其他论文：
+quote 为 “CFI = .97” 时，why 可以是“论文用它检验模型拟合。”，range 可以是“通用标准：多在 0 到 1 之间，.95 及以上常视为拟合良好。”，finding 可以是“论文报告 CFI = .97。通常意味着：拟合达到常用的良好标准。”，calculation 可以是“通用定义：比较假设模型与基线模型的拟合，并对复杂度作惩罚。”，measures 可以是“模型与数据的吻合程度。”
+
+论文文本：
+{text}
+
+输出 JSON 对象，键为 items。每个对象包含 kind、quote、why、range、finding、calculation、measures。kind 只能是 metric。"""
+
+
+SUGGEST_SYSTEM = """你是文献归类助手。只从给定的已有作者和已有主题中选择，不要发明名单之外的条目。
+每篇论文单独判断。作者只根据该篇的作者栏或文件名，主题只根据该篇的摘要和结论。
+没有摘要和结论时，才可以看文首。不要根据其他论文，也不要根据未提供的正文。
+没有合适项时对应数组为空。只输出一个 JSON 对象，不要使用 Markdown。"""
+
+
+def suggest_user_prompt(authors: str, topics: str, text: str) -> str:
+    return f"""已有作者（id 必须原样复制）：
+{authors or "（无）"}
+
+已有主题（id 必须原样复制）：
+{topics or "（无）"}
+
+{text}
+
+输出 JSON 对象，键为 papers。papers 是数组，每项包含 name、authors、topics、reason。
+name 必须与给出的文件名完全一致。authors 和 topics 是该篇自己的 id 数组。reason 用一句简体中文。"""
+
+
+CLASSIFY_SYSTEM = """你是文献归类助手。只从给定的已有主题中选择，不要发明新主题。
+一篇论文可以属于多个主题。只根据给出的标题、摘要和结论判断。没有这些栏目时，才看文首。
+没有合适主题时 topics 为空数组。只输出一个 JSON 对象，不要使用 Markdown。"""
+
+
+def classify_user_prompt(topics: str, text: str) -> str:
+    return f"""已有主题（id 必须原样复制）：
+{topics}
+
+{text}
+
+输出 JSON 对象，包含 topics 和 reason。topics 是 id 数组。reason 用一句简体中文。"""
+
+
 def coerce_array(data):
     if isinstance(data, list):
         return data

@@ -40,12 +40,23 @@ document.querySelector("#clear-authors").onclick = () => { state.authors.clear()
 document.querySelector("#clear-topics").onclick = () => { state.topics.clear(); renderFilters(); renderList(); draw(); };
 document.querySelector("#reset-layout").onclick = () => { state.positions.clear(); layout(true); draw(); };
 document.querySelector("#reader-close").onclick = closeReader;
+document.querySelector("#open-file-toggle").onclick = toggleOpenFileMenu;
+document.querySelector("#open-file-web").onclick = closeOpenFileMenu;
+document.querySelector("#open-file-local").onclick = openFileLocally;
+document.querySelector("#open-file-annotate").onclick = annotateOriginal;
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#open-file")) closeOpenFileMenu();
+});
 document.querySelector("#library-open").onclick = openLibrary;
 document.querySelector("#fill-biblio").onclick = fillAllBibliography;
+document.querySelector("#dedupe-open").onclick = openDuplicates;
+document.querySelector("#dedupe-close").onclick = () => document.querySelector("#dedupe-dialog").close();
+document.querySelector("#dedupe-merge").onclick = mergeDuplicates;
 document.querySelector("#upload-open").onclick = openUpload;
 document.querySelector("#upload-close").onclick = () => document.querySelector("#upload-dialog").close();
-document.querySelector("#files").onchange = updateFileLabel;
-document.querySelector("#folder").onchange = updateFileLabel;
+document.querySelector("#files").onchange = suggestUpload;
+document.querySelector("#folder").onchange = suggestUpload;
+document.querySelector("#classify-topics").onclick = classifyTopics;
 document.querySelector("#upload-form").onsubmit = submitUpload;
 
 canvas.addEventListener("pointerdown", onPointerDown);
@@ -111,7 +122,10 @@ function focusWeight(paper) {
 
 function renderFilters() {
   fillChips(document.querySelector("#author-filters"), state.data.authors, state.authors, (author) => author.label);
-  fillChips(document.querySelector("#topic-filters"), state.data.topics, state.topics, (topic) => topic.name);
+  fillChips(document.querySelector("#topic-filters"), state.data.topics, state.topics, (topic) => topic.name, {
+    label: "关系",
+    onClick: (topic) => inspect({ kind: "topic", id: topic.id }, false),
+  });
   const synthesis = currentSynthesis();
   const title = document.querySelector("#list-title");
   title.textContent = synthesis ? "这组论文" : "论文";
@@ -177,9 +191,10 @@ function profileButton(label, kind, id, generate) {
 }
 
 async function openProfile(kind, id, generate) {
+  clearDanger();
   app.classList.add("reading");
   document.querySelector("#reader").hidden = false;
-  document.querySelector("#open-file").hidden = true;
+  hideOpenFile();
   const body = document.querySelector("#reader-body");
   setReaderChrome("", null);
   body.innerHTML = `<p class="meta-line">${generate ? "正在更新笔记，请稍等…" : "正在打开笔记…"}</p>`;
@@ -203,10 +218,15 @@ async function openProfile(kind, id, generate) {
     record.has_profile = true;
     if (payload.updated_at) record.profile_updated_at = payload.updated_at;
   }
+  armDanger(
+    kind === "author" ? () => deleteAuthor(id, label) : () => deleteTopic(id, label),
+    () => deleteNote({ scope: kind, id }),
+    kind === "author" ? "删除作者" : "删除主题",
+  );
   renderProfileActions();
 }
 
-function fillChips(container, items, selected, label) {
+function fillChips(container, items, selected, label, extra) {
   container.innerHTML = "";
   if (!items.length) {
     container.textContent = "还没有";
@@ -224,7 +244,19 @@ function fillChips(container, items, selected, label) {
       renderList();
       draw();
     };
-    container.appendChild(button);
+    if (!extra) {
+      container.appendChild(button);
+      continue;
+    }
+    const wrap = document.createElement("span");
+    wrap.className = "chip-wrap";
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "text";
+    more.textContent = extra.label;
+    more.onclick = () => extra.onClick(item);
+    wrap.append(button, more);
+    container.appendChild(wrap);
   }
 }
 
@@ -546,6 +578,7 @@ function onWheel(event) {
 }
 
 async function inspect(node, center) {
+  clearDanger();
   state.focus = { kind: node.kind, id: node.id };
   if (center) {
     const point = state.positions.get(nodeKey(node));
@@ -558,13 +591,75 @@ async function inspect(node, center) {
   draw();
   const body = document.querySelector("#reader-body");
   const fileLink = document.querySelector("#open-file");
-  fileLink.hidden = true;
+  hideOpenFile();
   if (node.kind === "paper") await showPaper(node.id, body, fileLink);
   else if (node.kind === "author") showAuthor(node.id, body);
   else showTopic(node.id, body);
 }
 
+function hideOpenFile() {
+  const fileLink = document.querySelector("#open-file");
+  const status = document.querySelector("#open-file-status");
+  fileLink.hidden = true;
+  delete fileLink.dataset.key;
+  status.hidden = true;
+  status.textContent = "";
+  document.querySelector("#open-file-annotate").hidden = true;
+  closeOpenFileMenu();
+}
+
+function closeOpenFileMenu() {
+  const menu = document.querySelector("#open-file-menu");
+  const toggle = document.querySelector("#open-file-toggle");
+  menu.hidden = true;
+  toggle.setAttribute("aria-expanded", "false");
+}
+
+function toggleOpenFileMenu(event) {
+  event.stopPropagation();
+  const menu = document.querySelector("#open-file-menu");
+  const open = menu.hidden;
+  menu.hidden = !open;
+  event.currentTarget.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+async function openFileLocally() {
+  const key = document.querySelector("#open-file").dataset.key;
+  const status = document.querySelector("#open-file-status");
+  status.hidden = false;
+  status.textContent = "正在用本机阅读器打开…";
+  const response = await fetch("/api/file/open", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  status.textContent = response.ok ? "已用本机阅读器打开。保存批注时请保存这个文件。" : (payload.error || "没有打开");
+}
+
+async function annotateOriginal() {
+  const key = document.querySelector("#open-file").dataset.key;
+  const status = document.querySelector("#open-file-status");
+  const button = document.querySelector("#open-file-annotate");
+  status.hidden = false;
+  status.textContent = "正在阅读原文并写入批注，可能需要一两分钟…";
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/annotate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    status.textContent = response.ok ? (payload.message || "已写入批注") : (payload.error || "没有写入批注");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function closeReader() {
+  hideOpenFile();
+  clearDanger();
   state.focus = null;
   state.noteScope = null;
   hideSelectMenu();
@@ -574,6 +669,130 @@ function closeReader() {
   renderList();
   resize();
   draw();
+}
+
+function clearDanger() {
+  armDanger(null, null);
+}
+
+function armDanger(onRecord, onNote, recordLabel = "删除") {
+  const record = document.querySelector("#delete-record");
+  const note = document.querySelector("#delete-note");
+  record.hidden = !onRecord;
+  note.hidden = !onNote;
+  record.textContent = recordLabel;
+  note.textContent = "删除笔记";
+  record.onclick = onRecord;
+  note.onclick = onNote;
+}
+
+async function deletePaper(key) {
+  const paper = state.data.papers.find((item) => item.key === key);
+  const title = paper ? paper.title : "这篇论文";
+  const payload = await confirmDelete(
+    `/api/paper?key=${encodeURIComponent(key)}`,
+    `删除《${title}》？论文库里的原文和笔记会一起删除，作者和主题会保留。`,
+  );
+  if (!payload) return;
+  closeReader();
+  await load();
+}
+
+async function deleteAuthor(id, label) {
+  const payload = await confirmDelete(
+    `/api/author?id=${encodeURIComponent(id)}`,
+    `删除作者 ${label}？这个人的论文会留在库里。`,
+  );
+  if (!payload) return;
+  state.authors.delete(id);
+  closeReader();
+  await load();
+}
+
+async function deleteTopic(id, label) {
+  const payload = await confirmDelete(
+    `/api/topic?id=${encodeURIComponent(id)}`,
+    `删除主题「${label}」？主题下的论文会留在库里，从属和相关关系会去掉。`,
+  );
+  if (!payload) return;
+  state.topics.delete(id);
+  closeReader();
+  await load();
+}
+
+async function deleteNote(query) {
+  const params = new URLSearchParams(query);
+  const payload = await confirmDelete(`/api/note?${params.toString()}`, "删除这份笔记？论文、作者或主题本身会保留。");
+  if (!payload) return;
+  await load();
+  if (query.scope === "paper" && state.focus && state.focus.kind === "paper") {
+    await showPaper(query.id, document.querySelector("#reader-body"), document.querySelector("#open-file"));
+    return;
+  }
+  if (query.scope === "synthesis") {
+    closeReader();
+    return;
+  }
+  if (state.focus && state.focus.kind === query.scope) await inspect(state.focus, false);
+}
+
+async function confirmDelete(url, message) {
+  if (!window.confirm(message)) return null;
+  const response = await fetch(url, { method: "DELETE" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    window.alert(payload.error || "没有删除");
+    return null;
+  }
+  return payload;
+}
+
+async function openDuplicates() {
+  const dialog = document.querySelector("#dedupe-dialog");
+  const box = document.querySelector("#dedupe-groups");
+  const message = document.querySelector("#dedupe-message");
+  const button = document.querySelector("#dedupe-merge");
+  box.innerHTML = "";
+  message.textContent = "正在对照题名、副标题和 DOI…";
+  button.hidden = true;
+  dialog.showModal();
+  const response = await fetch("/api/duplicates");
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    message.textContent = payload.error || "没有完成查重";
+    return;
+  }
+  message.textContent = payload.message || "";
+  const groups = payload.groups || [];
+  button.hidden = !groups.length;
+  for (const group of groups) {
+    const section = document.createElement("section");
+    section.className = "dedupe-group";
+    for (const paper of group) {
+      const line = document.createElement("p");
+      line.textContent = paper.doi ? `${paper.title} · ${paper.doi}` : paper.title;
+      section.appendChild(line);
+    }
+    box.appendChild(section);
+  }
+}
+
+async function mergeDuplicates() {
+  const message = document.querySelector("#dedupe-message");
+  const button = document.querySelector("#dedupe-merge");
+  button.disabled = true;
+  message.textContent = "正在合并…";
+  const response = await fetch("/api/duplicates", { method: "POST" });
+  const payload = await response.json().catch(() => ({}));
+  button.disabled = false;
+  if (!response.ok) {
+    message.textContent = payload.error || "没有合并";
+    return;
+  }
+  message.textContent = payload.message || "已合并。";
+  button.hidden = true;
+  document.querySelector("#dedupe-groups").innerHTML = "";
+  await load();
 }
 
 async function showPaper(key, body, fileLink) {
@@ -586,7 +805,9 @@ async function showPaper(key, body, fileLink) {
   }
   if (payload.paper.has_file) {
     fileLink.hidden = false;
-    fileLink.href = `/api/file?key=${encodeURIComponent(key)}`;
+    fileLink.dataset.key = key;
+    document.querySelector("#open-file-web").href = `/api/file?key=${encodeURIComponent(key)}`;
+    document.querySelector("#open-file-annotate").hidden = payload.paper.file_suffix !== ".pdf";
   }
   const synthesis = currentSynthesis();
   const synthesisDate = synthesis && synthesis.has_synthesis && synthesis.updated_at ? `综合笔记更新于 ${formatUpdated(synthesis.updated_at)}` : "";
@@ -608,6 +829,11 @@ async function showPaper(key, body, fileLink) {
     { scope: "paper", id: key, label: payload.paper.title },
     payload.updated_at,
     () => updatePaperNote(key),
+  );
+  armDanger(
+    () => deletePaper(key),
+    payload.markdown ? () => deleteNote({ scope: "paper", id: key }) : null,
+    "删除论文",
   );
   const openSynthesis = document.querySelector("#open-synthesis");
   if (openSynthesis && synthesis && synthesis.has_synthesis) {
@@ -766,6 +992,11 @@ function showAuthor(id, body) {
     changeAlias(author.id, value.split(/[;；]/).map((item) => item.trim()).filter(Boolean), []);
   };
   body.querySelector("article").appendChild(profileButton(author.has_profile ? "查看作者笔记" : "生成作者笔记", "author", author.id, !author.has_profile));
+  armDanger(
+    () => deleteAuthor(author.id, author.label),
+    author.has_profile ? () => deleteNote({ scope: "author", id: author.id }) : null,
+    "删除作者",
+  );
 }
 
 function showTopic(id, body) {
@@ -773,9 +1004,17 @@ function showTopic(id, body) {
   setReaderChrome("", null);
   const topic = state.data.topics.find((item) => item.id === id);
   const papers = state.data.papers.filter((paper) => paper.topics.some((item) => item.id === id));
-  body.innerHTML = `<article class="note"><h1></h1><p class="meta-line">圆点越大，这篇在该主题下的分越高。选中左侧对应作者后，可以打开综合笔记。</p><div class="related" id="topic-papers"></div></article>`;
+  body.innerHTML = `<article class="note"><h1></h1><p class="meta-line">下位主题里的论文会自动出现在这里。圆点越大，这篇在该主题下的分越高。</p><div id="topic-relations"></div><h2>论文</h2><div class="related" id="topic-papers"></div></article>`;
   body.querySelector("h1").textContent = topic ? topic.name : id;
-  if (topic) body.querySelector("article").appendChild(profileButton(topic.has_profile ? "查看主题笔记" : "生成主题笔记", "topic", topic.id, !topic.has_profile));
+  if (topic) {
+    body.querySelector("article").appendChild(profileButton(topic.has_profile ? "查看主题笔记" : "生成主题笔记", "topic", topic.id, !topic.has_profile));
+    renderTopicRelations(topic, body.querySelector("#topic-relations"));
+    armDanger(
+      () => deleteTopic(topic.id, topic.name),
+      topic.has_profile ? () => deleteNote({ scope: "topic", id: topic.id }) : null,
+      "删除主题",
+    );
+  }
   const list = body.querySelector("#topic-papers");
   for (const paper of papers.sort((a, b) => (b.topics.find((item) => item.id === id)?.score || 0) - (a.topics.find((item) => item.id === id)?.score || 0))) {
     const button = document.createElement("button");
@@ -783,15 +1022,117 @@ function showTopic(id, body) {
     button.className = "paper-row";
     button.innerHTML = "<strong></strong><span></span>";
     button.querySelector("strong").textContent = paper.title;
-    const score = paper.topics.find((item) => item.id === id)?.score ?? 0;
-    button.querySelector("span").textContent = `相关度 ${score}`;
+    const link = paper.topics.find((item) => item.id === id);
+    const score = link?.score ?? 0;
+    button.querySelector("span").textContent = link?.inherited ? `经由下位主题 · 相关度 ${score}` : `相关度 ${score}`;
     button.onclick = () => inspect({ kind: "paper", id: paper.key }, true);
     list.appendChild(button);
   }
 }
 
+function renderTopicRelations(topic, box) {
+  const others = state.data.topics.filter((item) => item.id !== topic.id);
+  const parentIds = new Set((topic.parents || []).map((item) => item.id));
+  const childIds = new Set((topic.children || []).map((item) => item.id));
+  const relatedIds = new Set((topic.related || []).map((item) => item.id));
+  box.innerHTML = `<h2>从属</h2><div id="parent-list"></div><div id="child-list"></div><div class="relation-form"><select id="parent-select"></select><button type="button" id="parent-add">设为上位主题</button></div><h2>相关主题</h2><div id="related-list"></div><div class="relation-form"><select id="related-select"></select><button type="button" id="related-add">手动相关</button></div>`;
+  const parentList = box.querySelector("#parent-list");
+  for (const parent of topic.parents || []) {
+    parentList.appendChild(relationLine(`${parent.name} 的下位主题`, "取消", () => changeTopicParent(topic.id, parent.id, false)));
+  }
+  if (!(topic.parents || []).length) parentList.appendChild(meta("还没有上位主题。"));
+  const childList = box.querySelector("#child-list");
+  for (const child of topic.children || []) childList.appendChild(meta(`包含下位主题 ${child.name}`));
+  fillRelationSelect(box.querySelector("#parent-select"), others.filter((item) => !parentIds.has(item.id) && !childIds.has(item.id)));
+  box.querySelector("#parent-add").onclick = () => {
+    const parentId = box.querySelector("#parent-select").value;
+    if (parentId) changeTopicParent(topic.id, parentId, true);
+  };
+  const relatedList = box.querySelector("#related-list");
+  for (const related of topic.related || []) {
+    const how = [related.shared ? "有共同论文" : "", related.manual ? "手动" : ""].filter(Boolean).join(" · ");
+    const remove = related.manual ? () => changeTopicRelated(topic.id, related.id, false) : null;
+    relatedList.appendChild(relationLine(`${related.name}（${how}）`, remove ? "取消手动" : "", remove));
+  }
+  if (!(topic.related || []).length) relatedList.appendChild(meta("还没有相关主题。"));
+  fillRelationSelect(box.querySelector("#related-select"), others.filter((item) => !relatedIds.has(item.id)));
+  box.querySelector("#related-add").onclick = () => {
+    const otherId = box.querySelector("#related-select").value;
+    if (otherId) changeTopicRelated(topic.id, otherId, true);
+  };
+}
+
+function meta(text) {
+  const line = document.createElement("p");
+  line.className = "meta-line";
+  line.textContent = text;
+  return line;
+}
+
+function relationLine(label, action, onAction) {
+  const row = document.createElement("div");
+  row.className = "relation-line";
+  const name = document.createElement("span");
+  name.textContent = label;
+  row.appendChild(name);
+  if (onAction) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text";
+    button.textContent = action;
+    button.onclick = onAction;
+    row.appendChild(button);
+  }
+  return row;
+}
+
+function fillRelationSelect(select, topics) {
+  select.innerHTML = "";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = topics.length ? "选择主题" : "没有可选主题";
+  select.appendChild(empty);
+  for (const topic of topics) {
+    const option = document.createElement("option");
+    option.value = topic.id;
+    option.textContent = topic.name;
+    select.appendChild(option);
+  }
+}
+
+async function changeTopicParent(childId, parentId, add) {
+  const response = await fetch(add ? "/api/topic-parent" : `/api/topic-parent?child=${encodeURIComponent(childId)}&parent=${encodeURIComponent(parentId)}`, add ? {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ child: childId, parent: parentId }),
+  } : { method: "DELETE" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(payload.error || "从属关系没有保存");
+    return;
+  }
+  await load();
+  inspect({ kind: "topic", id: childId }, false);
+}
+
+async function changeTopicRelated(leftId, rightId, add) {
+  const response = await fetch(add ? "/api/topic-related" : `/api/topic-related?left=${encodeURIComponent(leftId)}&right=${encodeURIComponent(rightId)}`, add ? {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ left: leftId, right: rightId }),
+  } : { method: "DELETE" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(payload.error || "相关关系没有保存");
+    return;
+  }
+  await load();
+  inspect({ kind: "topic", id: leftId }, false);
+}
+
 async function showSynthesis(synthesis, body) {
-  document.querySelector("#open-file").hidden = true;
+  clearDanger();
+  hideOpenFile();
   body.innerHTML = "<p class='meta-line'>正在打开笔记…</p>";
   const response = await fetch(`/api/synthesis?author=${encodeURIComponent(synthesis.author_id)}&topic=${encodeURIComponent(synthesis.topic_id)}`);
   const payload = await response.json();
@@ -810,6 +1151,7 @@ async function showSynthesis(synthesis, body) {
     payload.updated_at,
     () => updateSynthesisNote(synthesis),
   );
+  armDanger(null, () => deleteNote({ scope: "synthesis", author: synthesis.author_id, topic: synthesis.topic_id }));
 }
 
 async function updateSynthesisNote(synthesis) {
@@ -882,23 +1224,18 @@ function escapeHtml(value) {
 }
 
 function openUpload() {
-  renderUploadChoices();
   document.querySelector("#upload-message").textContent = "";
   document.querySelector("#upload-dialog").showModal();
+  if (selectedFiles().length) suggestUpload();
 }
 
-function renderUploadChoices() {
-  if (!state.data) return;
-  mountChoice(document.querySelector("#upload-authors"), state.data.authors, (item) => item.label);
-  mountChoice(document.querySelector("#upload-topics"), state.data.topics, (item) => item.name);
-}
-
-function mountChoice(container, items, label) {
+function mountChoice(container, items, label, selected) {
   container.innerHTML = "";
+  const chosen = selected || new Set();
   for (const item of items) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "chip";
+    button.className = `chip${chosen.has(item.id) ? " on" : ""}`;
     button.dataset.token = item.id;
     button.textContent = label(item);
     button.onclick = () => button.classList.toggle("on");
@@ -911,6 +1248,108 @@ function updateFileLabel() {
   document.querySelector("#file-label").textContent = files.length ? `已选 ${files.length} 个文件` : "选择文件，或选择整个文件夹。同名论文会自动跳过。";
 }
 
+async function suggestUpload() {
+  updateFileLabel();
+  const files = selectedFiles();
+  const message = document.querySelector("#upload-message");
+  if (!files.length) {
+    message.textContent = "";
+    return;
+  }
+  message.className = "message";
+  message.textContent = "正在分别阅读作者栏、摘要和结论…";
+  const form = new FormData();
+  for (const file of files.slice(0, 40)) form.append("file", file, file.name);
+  const response = await fetch("/api/upload/suggest", { method: "POST", body: form });
+  const payload = await response.json().catch(() => ({}));
+  renderAssignments(files, response.ok ? payload.papers || [] : []);
+  if (!response.ok) {
+    message.className = "message error";
+    message.textContent = payload.error || "没有给出建议";
+    return;
+  }
+  message.className = "message";
+  message.textContent = payload.message || "";
+}
+
+function renderAssignments(files, suggestions) {
+  const box = document.querySelector("#upload-papers");
+  box.innerHTML = "";
+  if (!state.data) return;
+  files.forEach((file, index) => {
+    const suggestion = suggestions[index] && suggestions[index].name === file.name ? suggestions[index] : {};
+    const article = document.createElement("article");
+    article.className = "upload-paper";
+    article.dataset.name = file.name;
+    const title = document.createElement("h3");
+    title.textContent = file.name;
+    const note = document.createElement("p");
+    note.className = "meta-line";
+    note.textContent = suggestion.message || "还没有建议，请手选作者和主题。";
+    const authorLabel = document.createElement("p");
+    authorLabel.className = "meta-line";
+    authorLabel.textContent = "作者";
+    const authors = document.createElement("div");
+    authors.className = "chips authors";
+    const topicLabel = document.createElement("p");
+    topicLabel.className = "meta-line";
+    topicLabel.textContent = "研究主题";
+    const topics = document.createElement("div");
+    topics.className = "chips topics";
+    const newAuthor = document.createElement("input");
+    newAuthor.className = "new-author";
+    newAuthor.type = "text";
+    newAuthor.placeholder = "这篇的新作者，多项用 ; 隔开";
+    const newTopic = document.createElement("input");
+    newTopic.className = "new-topic";
+    newTopic.type = "text";
+    newTopic.placeholder = "这篇的新主题，多项用 ; 隔开";
+    article.append(title, note, authorLabel, authors, newAuthor, topicLabel, topics, newTopic);
+    box.appendChild(article);
+    const roles = new Map((suggestion.authors || []).map((item) => [item.id, item.reason || ""]));
+    mountChoice(authors, state.data.authors, (item) => authorChipLabel(item, roles), new Set((suggestion.authors || []).map((item) => item.id)));
+    mountChoice(topics, state.data.topics, (item) => item.name, new Set((suggestion.topics || []).map((item) => item.id)));
+    mountSuggested(authors, suggestion.new_authors || []);
+    mountSuggested(topics, suggestion.new_topics || []);
+  });
+}
+
+function authorChipLabel(item, roles) {
+  const role = roles.get(item.id) || "";
+  return /^(一作|二作|通信作者)( · (一作|二作|通信作者))?$/.test(role) ? `${item.label} · ${role}` : item.label;
+}
+
+function mountSuggested(container, items) {
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `chip suggested${item.selected === false ? "" : " on"}`;
+    button.dataset.token = item.name;
+    button.textContent = item.role ? `${item.name} · ${item.role}` : item.name;
+    button.onclick = () => button.classList.toggle("on");
+    container.appendChild(button);
+  }
+}
+
+async function classifyTopics() {
+  const button = document.querySelector("#classify-topics");
+  button.disabled = true;
+  button.textContent = "归类中…";
+  try {
+    const response = await fetch("/api/topics/classify", { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(payload.error || "没有完成再分类");
+      return;
+    }
+    await load();
+    alert(payload.message || "已按已有主题再分类");
+  } finally {
+    button.disabled = false;
+    button.textContent = "再分类";
+  }
+}
+
 function selectedFiles() {
   return [...document.querySelector("#files").files, ...document.querySelector("#folder").files];
 }
@@ -919,20 +1358,27 @@ async function submitUpload(event) {
   event.preventDefault();
   const message = document.querySelector("#upload-message");
   const files = selectedFiles();
-  const authors = [
-    ...[...document.querySelectorAll("#upload-authors .chip.on")].map((item) => item.dataset.token),
-    document.querySelector("#new-author").value.trim(),
-  ].filter(Boolean);
-  const topics = [
-    ...[...document.querySelectorAll("#upload-topics .chip.on")].map((item) => item.dataset.token),
-    document.querySelector("#new-topic").value.trim(),
-  ].filter(Boolean);
   if (!files.length) { message.className = "message error"; message.textContent = "请先选择论文文件。"; return; }
-  if (!authors.length || !topics.length) { message.className = "message error"; message.textContent = "请选择或填写作者和主题。"; return; }
+  const assignments = [...document.querySelectorAll("#upload-papers .upload-paper")].map((row) => ({
+    name: row.dataset.name,
+    authors: [
+      ...[...row.querySelectorAll(".authors .chip.on")].map((item) => item.dataset.token),
+      row.querySelector(".new-author").value.trim(),
+    ].filter(Boolean),
+    topics: [
+      ...[...row.querySelectorAll(".topics .chip.on")].map((item) => item.dataset.token),
+      row.querySelector(".new-topic").value.trim(),
+    ].filter(Boolean),
+  }));
+  const missing = assignments.find((item) => !item.authors.length || !item.topics.length);
+  if (assignments.length !== files.length || missing) {
+    message.className = "message error";
+    message.textContent = missing ? `请为《${missing.name}》选择或填写作者和主题。` : "请先等待每篇的作者和主题建议。";
+    return;
+  }
   const form = new FormData();
   for (const file of files) form.append("file", file, file.name);
-  form.append("author", authors.join(";"));
-  form.append("topic", topics.join(";"));
+  form.append("assignments", JSON.stringify(assignments));
   message.className = "message";
   message.textContent = "正在归类并生成笔记，请稍等…";
   const response = await fetch("/api/upload", { method: "POST", body: form });
@@ -944,6 +1390,7 @@ async function submitUpload(event) {
   message.textContent = `上传 ${payload.uploaded.length} 篇，跳过 ${payload.skipped.length} 篇。${noteStatus}${recognized ? `\n${recognized}` : ""}`;
   document.querySelector("#files").value = "";
   document.querySelector("#folder").value = "";
+  document.querySelector("#upload-papers").innerHTML = "";
   updateFileLabel();
   await load();
 }
@@ -1230,7 +1677,7 @@ function wrapExact(root, needle, item) {
 async function openLibrary() {
   app.classList.add("reading");
   document.querySelector("#reader").hidden = false;
-  document.querySelector("#open-file").hidden = true;
+  hideOpenFile();
   state.focus = null;
   state.noteScope = null;
   hideSelectMenu();

@@ -224,3 +224,156 @@ def test_bibliography_is_recognized_on_upload_and_can_be_edited(server: str):
     assert "year" not in filled["papers"][0]["filled"]
     _, paper = _json(server + "/api/paper?key=" + quote(key, safe=""))
     assert paper["paper"]["venue"] == "手改会议"
+
+
+def test_upload_suggests_known_authors_and_topics_and_classify_adds_a_match(server: str):
+    page = urlopen(server + "/").read().decode("utf-8")
+    assert "再分类" in page
+    assert "每篇会单独根据作者栏、摘要和结论" in page
+    body, content_type = _multipart(
+        {"author": "Huilian Qiu", "topic": "Science of Science"},
+        [("Alpha Paper.txt", "promotional language in grant applications".encode("utf-8"))],
+    )
+    _json(server + "/api/upload", body, content_type)
+    other_body, other_type = _multipart(
+        {"author": "Huilian Qiu", "topic": "Promotional Language"},
+        [("Beta Paper.txt", "beta".encode("utf-8"))],
+    )
+    _json(server + "/api/upload", other_body, other_type)
+    suggest_body, suggest_type = _multipart(
+        {},
+        [
+            ("Gamma.txt", "Huilian Qiu studies promotional language".encode("utf-8")),
+            ("Delta.txt", "Science of Science with semantics".encode("utf-8")),
+        ],
+    )
+    status_code, suggested = _json(server + "/api/upload/suggest", suggest_body, suggest_type)
+    assert status_code == 200
+    assert suggested["papers"][0]["name"] == "Gamma.txt"
+    assert any(item["name"] == "Huilian Qiu" for item in suggested["papers"][0]["authors"])
+    assert any(item["name"] == "Promotional Language" for item in suggested["papers"][0]["topics"])
+    assert suggested["papers"][1]["authors"] == []
+    assert any(item["name"] == "Science of Science" for item in suggested["papers"][1]["topics"])
+    assert not any(item["name"] == "Huilian Qiu" for item in suggested["papers"][1]["authors"])
+    assignments = json.dumps(
+        [
+            {"name": "One.txt", "authors": ["Huilian Qiu"], "topics": ["Science of Science"]},
+            {"name": "Two.txt", "authors": ["Ada Lovelace"], "topics": ["Promotional Language"]},
+        ]
+    )
+    assigned_body, assigned_type = _multipart(
+        {"assignments": assignments},
+        [("One.txt", "one".encode("utf-8")), ("Two.txt", "two".encode("utf-8"))],
+    )
+    status_code, assigned = _json(server + "/api/upload", assigned_body, assigned_type)
+    assert status_code == 200
+    _, graph = _json(server + "/api/graph")
+    one = next(item for item in graph["papers"] if item["title"] == "One")
+    two = next(item for item in graph["papers"] if item["title"] == "Two")
+    assert [item["label"] for item in one["authors"]] == ["Huilian Qiu"]
+    assert [item["name"] for item in one["topics"] if not item.get("inherited")] == ["Science of Science"]
+    assert [item["label"] for item in two["authors"]] == ["Ada Lovelace"]
+    assert [item["name"] for item in two["topics"] if not item.get("inherited")] == ["Promotional Language"]
+    _, graph = _json(server + "/api/graph")
+    science = next(item for item in graph["topics"] if item["name"] == "Science of Science")
+    promo = next(item for item in graph["topics"] if item["name"] == "Promotional Language")
+    status_code, linked = _json(
+        server + "/api/topic-parent",
+        json.dumps({"child": promo["id"], "parent": science["id"]}).encode("utf-8"),
+        "application/json",
+    )
+    assert status_code == 200
+    _, graph = _json(server + "/api/graph")
+    promo = next(item for item in graph["topics"] if item["name"] == "Promotional Language")
+    assert promo["parents"][0]["name"] == "Science of Science"
+    science = next(item for item in graph["topics"] if item["name"] == "Science of Science")
+    assert any(item["title"].startswith("Beta") for item in graph["papers"] if any(topic["id"] == science["id"] and topic["inherited"] for topic in item["topics"]))
+    status_code, classified = _json(server + "/api/topics/classify", b"{}", "application/json")
+    assert status_code == 200
+    assert classified["added"] >= 1
+
+
+def test_open_file_menu_can_launch_the_local_reader(server: str, monkeypatch: pytest.MonkeyPatch):
+    page = urlopen(server + "/").read().decode("utf-8")
+    assert "从网页打开原文" in page
+    assert "用本机阅读器打开" in page
+    opened: list[Path] = []
+    monkeypatch.setattr("autopaper.web.server.launch_local_file", lambda path: opened.append(Path(path)))
+    body, content_type = _multipart(
+        {"author": "Huilian Qiu", "topic": "Science of Science"},
+        [("Alpha Paper.txt", "原文正文".encode("utf-8"))],
+    )
+    _json(server + "/api/upload", body, content_type)
+    _, graph = _json(server + "/api/graph")
+    key = graph["papers"][0]["key"]
+    status_code, payload = _json(
+        server + "/api/file/open",
+        json.dumps({"key": key}).encode("utf-8"),
+        "application/json",
+    )
+    assert status_code == 200 and payload["ok"] is True
+    assert opened[0].is_file()
+    assert "library" in opened[0].parts
+    file_bytes = urlopen(server + "/api/file?key=" + quote(key, safe="")).read()
+    assert file_bytes == "原文正文".encode("utf-8")
+
+
+def test_annotate_endpoint_rejects_non_pdf_and_can_write_a_pdf(server: str, monkeypatch: pytest.MonkeyPatch):
+    page = urlopen(server + "/").read().decode("utf-8")
+    assert "自动批注原文" in page
+    body, content_type = _multipart(
+        {"author": "Huilian Qiu", "topic": "Science of Science"},
+        [("Alpha Paper.txt", "原文正文".encode("utf-8"))],
+    )
+    _json(server + "/api/upload", body, content_type)
+    _, graph = _json(server + "/api/graph")
+    text_key = graph["papers"][0]["key"]
+    assert graph["papers"][0]["file_suffix"] == ".txt"
+    try:
+        _json(server + "/api/annotate", json.dumps({"key": text_key}).encode("utf-8"), "application/json")
+    except HTTPError as exc:
+        assert exc.code == 400
+        assert "PDF" in json.loads(exc.read().decode("utf-8"))["error"]
+    else:
+        raise AssertionError("文本文件不应写入 PDF 批注")
+
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+
+    pdf_buffer = BytesIO()
+    pdf_writer = PdfWriter()
+    pdf_writer.add_blank_page(width=612, height=792)
+    pdf_writer.write(pdf_buffer)
+    pdf_body, pdf_type = _multipart(
+        {"author": "Huilian Qiu", "topic": "Science of Science"},
+        [("Beta Paper.pdf", pdf_buffer.getvalue())],
+    )
+    _json(server + "/api/upload", pdf_body, pdf_type)
+    _, graph = _json(server + "/api/graph")
+    pdf_paper = next(item for item in graph["papers"] if item["title"].startswith("Beta"))
+    assert pdf_paper["file_suffix"] == ".pdf"
+
+    class Dummy:
+        def close(self) -> None:
+            return None
+
+    seen: dict[str, Path] = {}
+
+    def fake_annotate(path, llm):
+        from autopaper.analysis.pdfnotes import AnnotateResult
+
+        seen["path"] = Path(path)
+        return AnnotateResult(path=Path(path), added=2, by_kind={"keyword": 2})
+
+    monkeypatch.setattr("autopaper.web.server._open_llm", lambda settings: Dummy())
+    monkeypatch.setattr("autopaper.web.server.annotate_pdf", fake_annotate)
+    status_code, payload = _json(
+        server + "/api/annotate",
+        json.dumps({"key": pdf_paper["key"]}).encode("utf-8"),
+        "application/json",
+    )
+    assert status_code == 200
+    assert payload["added"] == 2
+    assert seen["path"].suffix.lower() == ".pdf"
+    assert "library" in seen["path"].parts

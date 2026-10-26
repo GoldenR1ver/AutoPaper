@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +12,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from autopaper.analysis.biblio import fill_local_papers, fill_paper, format_recognized, recognize_uploaded, set_bibliography
+from autopaper.analysis.classify import reclassify_library, suggest_many
+from autopaper.analysis.excerpt import build_excerpt
+from autopaper.analysis.reader import load_catalog_source
+from autopaper.analysis.pdfnotes import annotate_pdf
 from autopaper.analysis.notes import (
     author_profile_path,
     file_updated,
@@ -25,7 +32,16 @@ from autopaper.llm.prompts import FOLLOWUP_SYSTEM, followup_question, followup_u
 from autopaper.catalog import format_author, require_existing_author, resolve_authors, resolve_topics
 from autopaper.config import Settings
 from autopaper.errors import AutoPaperError, NotFoundError
-from autopaper.library import plan_uploads, safe_filename, store_uploads
+from autopaper.library import (
+    plan_uploads,
+    remove_author_note,
+    remove_paper_files,
+    remove_paper_note,
+    remove_synthesis_note,
+    remove_topic_note,
+    safe_filename,
+    store_uploads,
+)
 from autopaper.storage.db import KnowledgeBase
 from autopaper.web.graph import build_library_graph
 
@@ -138,6 +154,26 @@ class LibraryApp:
             if not path.exists():
                 raise NotFoundError("本地文件已经不在原位置")
             return path
+
+    def open_local(self, key: str) -> dict:
+        path = self.file_path(key)
+        try:
+            launch_local_file(path)
+        except OSError as exc:
+            raise AutoPaperError(f"无法用本机阅读器打开：{exc}") from exc
+        return {"ok": True}
+
+    def annotate_original(self, key: str) -> dict:
+        path = self.file_path(key)
+        if path.suffix.lower() != ".pdf":
+            raise AutoPaperError("自动批注目前只写入 PDF。")
+        llm = _open_llm(self.settings)
+        if llm is None:
+            raise AutoPaperError("自动批注需要 OPENAI_API_KEY 或 DEEPSEEK_API_KEY。")
+        try:
+            return annotate_pdf(path, llm).to_dict()
+        finally:
+            llm.close()
 
     def synthesis(self, author_id: str, topic_id: str) -> dict:
         with self.lock, self._kb() as kb:
@@ -380,6 +416,81 @@ class LibraryApp:
         write_highlight_library(self.settings.data_dir, rows)
         return {"ok": True}
 
+    def duplicate_papers(self) -> dict:
+        with self.lock, self._kb() as kb:
+            groups = kb.duplicate_groups()
+        return {
+            "groups": [
+                [{"key": paper.key, "title": paper.title, "doi": paper.doi or ""} for paper in group]
+                for group in groups
+            ],
+            "message": _duplicate_message(groups),
+        }
+
+    def merge_duplicates(self) -> dict:
+        with self.lock, self._kb() as kb:
+            merged = kb.merge_same_papers()
+            rows = kb.list_highlights()
+        write_highlight_library(self.settings.data_dir, rows)
+        if not merged:
+            return {"ok": True, "merged": 0, "groups": [], "message": "没有发现重复论文。"}
+        lines = []
+        for item in merged:
+            joined = "、".join(f"《{title}》" for title in item["removed"])
+            line = f"已把 {joined} 并入《{item['title']}》。"
+            if item["extra_files"]:
+                line += "另一份原文还在磁盘上，可以稍后自行删除。"
+            lines.append(line)
+        return {"ok": True, "merged": len(merged), "groups": merged, "message": "".join(lines)}
+
+    def remove_paper(self, key: str) -> dict:
+        with self.lock, self._kb() as kb:
+            paper = kb.resolve_paper(key)
+            if paper is None:
+                raise NotFoundError(f"没有找到论文：{key}")
+            remove_paper_files(self.settings.data_dir, paper, kb)
+            paper = kb.delete_paper(paper.key)
+            rows = kb.list_highlights()
+        write_highlight_library(self.settings.data_dir, rows)
+        return {"ok": True, "message": f"已删除论文《{paper.title}》。"}
+
+    def remove_author(self, author_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            author = kb.delete_author(author_id)
+            remove_author_note(self.settings.data_dir, author)
+            rows = kb.list_highlights()
+        write_highlight_library(self.settings.data_dir, rows)
+        return {"ok": True, "message": f"已删除作者 {format_author(author)}。论文仍留在库里。"}
+
+    def remove_topic(self, topic_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            topic = kb.delete_topic_record(topic_id)
+            remove_topic_note(self.settings.data_dir, topic)
+            rows = kb.list_highlights()
+        write_highlight_library(self.settings.data_dir, rows)
+        return {"ok": True, "message": f"已删除主题「{topic.name}」。论文仍留在库里。"}
+
+    def remove_note(self, scope: str, scope_id: str, author_id: str = "", topic_id: str = "") -> dict:
+        with self.lock, self._kb() as kb:
+            if scope == "paper":
+                paper = kb.delete_reading(scope_id)
+                remove_paper_note(paper)
+                return {"ok": True, "message": f"已删除《{paper.title}》的笔记。论文和原文还在。"}
+            if scope == "author":
+                author = kb.get_author(scope_id)
+                remove_author_note(self.settings.data_dir, author)
+                return {"ok": True, "message": f"已删除 {format_author(author)} 的作者笔记。"}
+            if scope == "topic":
+                topic = kb.get_topic(scope_id)
+                remove_topic_note(self.settings.data_dir, topic)
+                return {"ok": True, "message": f"已删除主题「{topic.name}」的笔记。"}
+            if scope == "synthesis":
+                author = require_existing_author(kb, author_id)
+                topic = kb.get_topic(topic_id)
+                remove_synthesis_note(self.settings.data_dir, author, topic)
+                return {"ok": True, "message": "已删除这组综合笔记。"}
+            raise AutoPaperError("scope 必须是 paper、author、topic 或 synthesis")
+
     def _require_scope(self, kb: KnowledgeBase, scope: str, scope_id: str) -> None:
         if scope == "paper":
             if kb.resolve_paper(scope_id) is None:
@@ -437,13 +548,73 @@ class LibraryApp:
                 raise NotFoundError(f"没有找到论文：{key}")
             return set_bibliography(kb, paper, year=year, venue=venue, doi=doi, url=url)
 
+    def suggest_upload(self, files: list[tuple[str, bytes]]) -> dict:
+        if not files:
+            raise AutoPaperError("请先选择论文文件。")
+        excerpts = []
+        with tempfile.TemporaryDirectory(prefix="autopaper-suggest-") as temporary:
+            root = Path(temporary)
+            for filename, data in files[:40]:
+                path = root / safe_filename(filename)
+                path.write_bytes(data)
+                try:
+                    body, metadata_author = load_catalog_source(path)
+                except AutoPaperError:
+                    body, metadata_author = "", ""
+                excerpts.append(build_excerpt(Path(filename).name, body, metadata_author))
+        with self._kb() as kb:
+            authors = kb.list_authors()
+            topics = kb.list_topics()
+        llm = _open_llm(self.settings)
+        try:
+            result = suggest_many(excerpts, authors, topics, llm)
+        finally:
+            if llm is not None:
+                llm.close()
+        if len(files) > 40:
+            result["message"] += " 一次最多阅读 40 篇的作者栏、摘要和结论，其余请手选。"
+        return result
+
+    def set_topic_parent(self, child_id: str, parent_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            kb.set_topic_parent(child_id, parent_id)
+        return {"ok": True}
+
+    def remove_topic_parent(self, child_id: str, parent_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            kb.remove_topic_parent(child_id, parent_id)
+        return {"ok": True}
+
+    def set_topic_related(self, left_id: str, right_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            kb.add_topic_related(left_id, right_id)
+        return {"ok": True}
+
+    def remove_topic_related(self, left_id: str, right_id: str) -> dict:
+        with self.lock, self._kb() as kb:
+            kb.remove_topic_related(left_id, right_id)
+        return {"ok": True}
+
+    def classify_topics(self) -> dict:
+        llm = _open_llm(self.settings)
+        try:
+            with self.lock, self._kb() as kb:
+                return reclassify_library(kb, llm)
+        finally:
+            if llm is not None:
+                llm.close()
+
     def upload(self, fields: dict[str, list[str]], files: list[tuple[str, bytes]]) -> dict:
         if not files:
             raise AutoPaperError("请选择至少一篇 PDF、TXT 或 Markdown。")
         bibliography: list[dict] = []
+        assignment_rows = _assignment_rows(fields)
+        if assignment_rows is not None and len(assignment_rows) != len(files):
+            raise AutoPaperError("作者和主题的篇数与文件数不一致")
         with tempfile.TemporaryDirectory(prefix="autopaper-upload-") as temporary:
             root = Path(temporary)
             used: set[str] = set()
+            stored_names: list[str] = []
             for filename, data in files:
                 name = safe_filename(filename)
                 stem = Path(name).stem
@@ -453,6 +624,7 @@ class LibraryApp:
                     name = safe_filename(f"{stem}-{count}{suffix}")
                     count += 1
                 used.add(name.casefold())
+                stored_names.append(name)
                 (root / name).write_bytes(data)
             with self.lock, self._kb() as kb:
                 planned = plan_uploads(root, kb, self.settings.data_dir)
@@ -460,12 +632,28 @@ class LibraryApp:
                 authors = []
                 topics = []
                 uploaded_papers = []
-                if incoming:
+                by_name = None
+                if incoming and assignment_rows is not None:
+                    by_name = {}
+                    for filename, stored_name, spec in zip((item[0] for item in files), stored_names, assignment_rows):
+                        if Path(str(spec.get("name") or "")).name != Path(filename).name:
+                            raise AutoPaperError(f"《{filename}》的建议和文件对不上")
+                        try:
+                            item_authors = resolve_authors(kb, _join_tokens(spec.get("authors")))
+                            item_topics = resolve_topics(kb, _join_tokens(spec.get("topics")))
+                        except AutoPaperError as exc:
+                            raise AutoPaperError(f"{filename}：{exc}") from exc
+                        by_name[stored_name] = (item_authors, item_topics)
+                    authors = _unique_authors(author for pair in by_name.values() for author in pair[0])
+                    topics = _unique_topics(topic for pair in by_name.values() for topic in pair[1])
+                    planned = store_uploads(planned, kb, [], [], by_name)
+                elif incoming:
                     author_raw = "；".join(fields.get("author") or [])
                     topic_raw = "；".join(fields.get("topic") or [])
                     authors = resolve_authors(kb, author_raw)
                     topics = resolve_topics(kb, topic_raw)
                     planned = store_uploads(planned, kb, authors, topics)
+                if incoming:
                     uploaded_papers = [
                         kb.resolve_paper(item.paper_key) for item in planned if not item.skip and item.paper_key
                     ]
@@ -609,12 +797,27 @@ def _handler_class(app: LibraryApp):
             if path == "/api/highlights":
                 self._json({"highlights": app.highlights(query.get("scope", [""])[0], query.get("id", [""])[0])})
                 return
+            if path == "/api/duplicates":
+                self._json(app.duplicate_papers())
+                return
             raise NotFoundError("没有这个地址")
 
         def _post(self) -> None:
             parsed = urlparse(self.path)
             length = int(self.headers.get("Content-Length") or "0")
             body = self.rfile.read(length) if length else b""
+            if parsed.path == "/api/file/open":
+                payload = _json_body(body)
+                self._json(app.open_local(str(payload.get("key") or "")))
+                return
+            if parsed.path == "/api/annotate":
+                payload = _json_body(body)
+                self._json(app.annotate_original(str(payload.get("key") or "")))
+                return
+            if parsed.path == "/api/upload/suggest":
+                _fields, files = parse_multipart(body, self.headers.get("Content-Type", ""))
+                self._json(app.suggest_upload(files))
+                return
             if parsed.path == "/api/upload":
                 fields, files = parse_multipart(body, self.headers.get("Content-Type", ""))
                 self._json(app.upload(fields, files))
@@ -656,12 +859,26 @@ def _handler_class(app: LibraryApp):
                     )
                 )
                 return
+            if parsed.path == "/api/topic-parent":
+                payload = _json_body(body)
+                self._json(app.set_topic_parent(str(payload.get("child") or ""), str(payload.get("parent") or "")))
+                return
+            if parsed.path == "/api/topic-related":
+                payload = _json_body(body)
+                self._json(app.set_topic_related(str(payload.get("left") or ""), str(payload.get("right") or "")))
+                return
+            if parsed.path == "/api/topics/classify":
+                self._json(app.classify_topics())
+                return
             if parsed.path == "/api/alias":
                 payload = _json_body(body)
                 author = str(payload.get("author") or "")
                 add = [str(item) for item in payload.get("add") or []]
                 remove = [str(item) for item in payload.get("remove") or []]
                 self._json(app.update_alias(author, add, remove))
+                return
+            if parsed.path == "/api/duplicates":
+                self._json(app.merge_duplicates())
                 return
             raise NotFoundError("没有这个地址")
 
@@ -670,6 +887,32 @@ def _handler_class(app: LibraryApp):
             query = parse_qs(parsed.query)
             if unquote(parsed.path) == "/api/highlights":
                 self._json(app.remove_highlight(_one(query, "id")))
+                return
+            if unquote(parsed.path) == "/api/topic-parent":
+                self._json(app.remove_topic_parent(_one(query, "child"), _one(query, "parent")))
+                return
+            if unquote(parsed.path) == "/api/topic-related":
+                self._json(app.remove_topic_related(_one(query, "left"), _one(query, "right")))
+                return
+            path = unquote(parsed.path)
+            if path == "/api/paper":
+                self._json(app.remove_paper(_one(query, "key")))
+                return
+            if path == "/api/author":
+                self._json(app.remove_author(_one(query, "id")))
+                return
+            if path == "/api/topic":
+                self._json(app.remove_topic(_one(query, "id")))
+                return
+            if path == "/api/note":
+                self._json(
+                    app.remove_note(
+                        query.get("scope", [""])[0],
+                        query.get("id", [""])[0],
+                        query.get("author", [""])[0],
+                        query.get("topic", [""])[0],
+                    )
+                )
                 return
             raise NotFoundError("没有这个地址")
 
@@ -692,10 +935,74 @@ def _handler_class(app: LibraryApp):
     return Handler
 
 
+def _duplicate_message(groups: list) -> str:
+    if not groups:
+        return "没有发现重复论文。"
+    count = sum(len(group) for group in groups)
+    return f"发现 {len(groups)} 组、共 {count} 篇可能是同一篇。依据是题名或副标题、DOI，以及 arXiv、PubMed、OpenAlex、Semantic Scholar 标识。"
+
+
+def launch_local_file(path: Path) -> None:
+    """用系统默认程序打开论文库里的原件，阅读器保存时会写回这个文件。"""
+    if os.name == "nt":
+        os.startfile(path)  # type: ignore[attr-defined]
+        return
+    command = ["open", os.fspath(path)] if sys.platform == "darwin" else ["xdg-open", os.fspath(path)]
+    subprocess.Popen(command)
+
+
 def _open_llm(settings: Settings) -> LLMClient | None:
     if settings.disable_llm or not settings.llm_api_key:
         return None
     return LLMClient(settings)
+
+
+def _assignment_rows(fields: dict[str, list[str]]) -> list[dict] | None:
+    raw_list = fields.get("assignments")
+    if not raw_list or not str(raw_list[0]).strip():
+        return None
+    try:
+        payload = json.loads(raw_list[0])
+    except json.JSONDecodeError as exc:
+        raise AutoPaperError("分篇作者和主题不是 JSON") from exc
+    if not isinstance(payload, list):
+        raise AutoPaperError("分篇作者和主题不是列表")
+    rows: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise AutoPaperError("分篇作者和主题里有无法识别的一项")
+        rows.append(item)
+    return rows
+
+
+def _join_tokens(raw) -> str:
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        return ";".join(text for text in (str(item).strip() for item in raw) if text)
+    return ""
+
+
+def _unique_authors(items):
+    chosen = []
+    seen: set[str] = set()
+    for author in items:
+        if author.id in seen:
+            continue
+        seen.add(author.id)
+        chosen.append(author)
+    return chosen
+
+
+def _unique_topics(items):
+    chosen = []
+    seen: set[str] = set()
+    for topic in items:
+        if topic.id in seen:
+            continue
+        seen.add(topic.id)
+        chosen.append(topic)
+    return chosen
 
 
 def _json_body(body: bytes) -> dict:

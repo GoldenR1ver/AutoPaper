@@ -59,9 +59,24 @@ def same_paper(left: Paper, right: Paper, threshold: float) -> bool:
         return False
     if left_title == right_title:
         return True
+    if _title_extension(left_title, right_title):
+        return True
     if min(len(left_title), len(right_title)) < 24:
         return False
     return fuzz.ratio(left_title, right_title) >= threshold
+
+
+def _title_extension(left: str, right: str) -> bool:
+    """短题名是长题名的完整前缀时，视为同一篇加上了副标题。
+
+    短题名至少四个词、24 个字符，多出来的部分也要有实质内容。
+    这样「Psychometrics in Behavioral Software Engineering」
+    会并上带冒号副标题的全称，而「Editorial」不会吞掉更长的标题。
+    """
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    if len(short) < 24 or len(short.split()) < 4 or not long.startswith(short + " "):
+        return False
+    return len(long[len(short) :].strip()) >= 8
 
 
 class _Clusters:
@@ -72,21 +87,22 @@ class _Clusters:
         self.titles: dict[str, list[int]] = defaultdict(list)
         self.blocks: dict[str, list[int]] = defaultdict(list)
 
-    def add(self, paper: Paper) -> None:
+    def add(self, paper: Paper) -> int | None:
         current = copy_paper(paper).cleanup()
         if not normalize_title(current.title):
-            return
+            return None
         match = self._find(current)
         if match is None:
             current.key = make_key(current)
             index = len(self.clusters)
             self.clusters.append(current)
             self._remember(index, current)
-            return
+            return index
         merged = merge_papers(self.clusters[match], current)
         self.clusters[match] = merged
         self._remember(match, current)
         self._remember(match, merged)
+        return match
 
     def _find(self, current: Paper) -> int | None:
         seen: set[int] = set()
@@ -130,3 +146,15 @@ def deduplicate(papers: list[Paper], threshold: float = 92) -> list[Paper]:
     for paper in papers:
         clusters.add(paper)
     return clusters.clusters
+
+
+def group_papers(papers: list[Paper], threshold: float = 92) -> list[list[Paper]]:
+    """把已经入库的论文按同一标识分成组。只返回两篇及以上的组。"""
+    clusters = _Clusters(threshold)
+    buckets: dict[int, list[Paper]] = defaultdict(list)
+    for paper in papers:
+        index = clusters.add(paper)
+        if index is None:
+            continue
+        buckets[index].append(paper)
+    return [group for group in buckets.values() if len(group) > 1]

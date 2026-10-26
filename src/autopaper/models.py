@@ -89,6 +89,7 @@ class ScoredPaper:
     score: float
     reason: str
     status: str
+    inherited: bool = False
 
 
 @dataclass

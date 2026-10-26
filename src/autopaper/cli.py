@@ -11,6 +11,7 @@ import typer
 
 from autopaper import __version__
 from autopaper.analysis.biblio import fill_local_papers, format_recognized, recognize_uploaded
+from autopaper.analysis.classify import reclassify_library
 from autopaper.analysis.notes import (
     generate_author_profile,
     generate_topic_profile,
@@ -18,6 +19,7 @@ from autopaper.analysis.notes import (
     run_notes,
     write_paper_files,
 )
+from autopaper.analysis.pdfnotes import annotate_pdf
 from autopaper.analysis.reader import build_reading, load_document, model_label
 from autopaper.analysis.report import write_topic_report
 from autopaper.analysis.researcher import profile_researcher
@@ -533,6 +535,24 @@ def _prompt_topics(kb: KnowledgeBase) -> str:
     return typer.prompt("研究主题（多项用 ; 隔开，可填编号、已有名称或新名称）")
 
 
+@app.command("dedupe")
+def dedupe_cmd(ctx: typer.Context) -> None:
+    """按题名、副标题、DOI 和其他标识合并库里的重复论文。"""
+    with cli_errors():
+        settings = settings_from(ctx)
+        with open_kb(settings) as kb:
+            groups = kb.duplicate_groups()
+            if not groups:
+                typer.echo("没有发现重复论文。")
+                return
+            for group in groups:
+                titles = "、".join(paper.title for paper in group)
+                typer.echo(f"将合并：{titles}")
+            merged = kb.merge_same_papers()
+        for item in merged:
+            typer.echo(f"已并入《{item['title']}》")
+
+
 @app.command("upload")
 def upload_cmd(
     ctx: typer.Context,
@@ -540,7 +560,7 @@ def upload_cmd(
     author: Optional[str] = typer.Option(None, "--author", "-a", help="作者。多项用 ; 隔开，可填编号、主名、别名或新名字。"),
     topic: Optional[str] = typer.Option(None, "--topic", "-t", help="研究主题。多项用 ; 隔开，可填编号、已有名称或新名称。"),
 ) -> None:
-    """把目录中的论文按文件名归类入库。同名论文会跳过。"""
+    """把目录中的论文按题名、副标题、DOI 和其他标识归类入库。同一篇会跳过。"""
     with cli_errors():
         settings = settings_from(ctx)
         with open_kb(settings) as kb:
@@ -662,6 +682,23 @@ def search_cmd(
             typer.echo(f"    {paper.key}")
 
 
+@app.command("classify")
+def classify_cmd(ctx: typer.Context) -> None:
+    """按已有主题为本地论文再分类。有模型时用模型，否则按主题词匹配。"""
+    with cli_errors():
+        settings = settings_from(ctx)
+        llm = maybe_llm(settings)
+        try:
+            with open_kb(settings) as kb:
+                result = reclassify_library(kb, llm)
+            typer.echo(result["message"])
+            for item in result["links"]:
+                typer.echo(f"  {item['paper']} -> {item['topic']}")
+        finally:
+            if llm is not None:
+                llm.close()
+
+
 @app.command("read")
 def read_cmd(
     ctx: typer.Context,
@@ -701,6 +738,33 @@ def read_cmd(
             if library_note is not None:
                 typer.echo(f"已写入 {library_note}", err=True)
             typer.echo(markdown)
+        finally:
+            llm.close()
+
+
+@app.command("annotate")
+def annotate_cmd(
+    ctx: typer.Context,
+    paper_ref: str = typer.Argument(..., help="知识库中的论文 key、DOI、arXiv id 或标题。"),
+) -> None:
+    """在论文 PDF 原件上写入彩色批注。"""
+    with cli_errors():
+        settings = settings_from(ctx)
+        llm = maybe_llm(settings)
+        if llm is None:
+            raise AutoPaperError("自动批注需要 OPENAI_API_KEY 或 DEEPSEEK_API_KEY。")
+        try:
+            with open_kb(settings) as kb:
+                paper = _resolve_or_create_paper(kb, paper_ref, None, None)
+                if not paper.local_path:
+                    raise AutoPaperError("这篇论文没有本地 PDF。")
+                path = Path(paper.local_path)
+                if not path.exists():
+                    raise NotFoundError("本地文件已经不在原位置")
+                if path.suffix.lower() != ".pdf":
+                    raise AutoPaperError("自动批注目前只写入 PDF。")
+                result = annotate_pdf(path, llm)
+            typer.echo(result.message())
         finally:
             llm.close()
 

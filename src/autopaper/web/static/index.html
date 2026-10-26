@@ -23,6 +23,7 @@
         </div>
         <button type="button" id="library-open">我的笔记库</button>
         <button type="button" id="fill-biblio">补全题录</button>
+        <button type="button" id="dedupe-open">合并重复</button>
         <button type="button" class="primary" id="upload-open">上传论文</button>
       </div>
     </header>
@@ -41,7 +42,7 @@
         <div id="author-filters" class="chips"></div>
       </section>
       <section>
-        <div class="section-head"><h2>主题</h2><button type="button" id="clear-topics" class="text">清空</button></div>
+        <div class="section-head"><h2>主题</h2><button type="button" id="classify-topics" class="text">再分类</button><button type="button" id="clear-topics" class="text">清空</button></div>
         <div id="topic-filters" class="chips"></div>
       </section>
       <section class="list-section">
@@ -72,7 +73,17 @@
         <span id="note-updated"></span>
         <span class="reader-actions">
           <button type="button" id="update-note" hidden>更新笔记</button>
-          <a id="open-file" hidden target="_blank" rel="noreferrer">打开原文</a>
+          <button type="button" id="delete-note" class="text danger" hidden>删除笔记</button>
+          <button type="button" id="delete-record" class="text danger" hidden>删除</button>
+          <span id="open-file" class="open-file" hidden>
+            <button type="button" id="open-file-toggle" aria-expanded="false" aria-controls="open-file-menu">打开原文</button>
+            <span id="open-file-menu" class="open-file-menu" hidden>
+              <a id="open-file-web" target="_blank" rel="noreferrer">从网页打开原文</a>
+              <button type="button" id="open-file-local">用本机阅读器打开</button>
+              <button type="button" id="open-file-annotate" hidden>自动批注原文</button>
+              <p id="open-file-status" class="open-file-status" hidden></p>
+            </span>
+          </span>
         </span>
       </div>
       <div id="reader-body"></div>
@@ -90,20 +101,24 @@
         <input id="folder" type="file" webkitdirectory directory multiple />
         <span id="file-label">选择文件，或选择整个文件夹。同名论文会自动跳过。</span>
       </label>
-      <fieldset>
-        <legend>作者</legend>
-        <div id="upload-authors" class="chips"></div>
-        <input id="new-author" type="text" placeholder="新作者主名，多项用 ; 隔开" />
-      </fieldset>
-      <fieldset>
-        <legend>研究主题</legend>
-        <div id="upload-topics" class="chips"></div>
-        <input id="new-topic" type="text" placeholder="新主题，多项用 ; 隔开" />
-      </fieldset>
-      <p class="hint">点选已有作者或主题。别名在图里点开作者后调整。新论文归类后会自动生成笔记，同名论文会跳过。</p>
+      <div id="upload-papers"></div>
+      <p class="hint">每篇会单独根据作者栏、摘要和结论建议。默认勾选一作、二作和通信作者，并列出论文关键词，其中前两个默认勾选。再分类时会为已有论文补上一作、二作和前两个关键词。题名相同、一短一长的副标题、或 DOI 等标识相同，都会当作同一篇跳过。仍可以改。新论文归类后会自动生成笔记。</p>
       <p id="upload-message" class="message"></p>
       <div class="dialog-actions">
         <button type="submit" class="primary" id="upload-submit">开始上传</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="dedupe-dialog">
+    <form method="dialog">
+      <header>
+        <h2>合并重复论文</h2>
+        <button type="button" id="dedupe-close" class="text">关闭</button>
+      </header>
+      <div id="dedupe-groups"></div>
+      <p id="dedupe-message" class="message"></p>
+      <div class="dialog-actions">
+        <button type="button" class="primary" id="dedupe-merge">合并这些重复</button>
       </div>
     </form>
   </dialog>

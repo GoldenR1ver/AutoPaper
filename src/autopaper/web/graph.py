@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from autopaper.analysis.notes import author_profile_path, file_updated, synthesis_path, topic_profile_path
 from autopaper.catalog import format_author
 from autopaper.models import Paper
@@ -53,7 +55,12 @@ def build_library_graph(kb: KnowledgeBase, data_dir) -> dict:
         for scored in kb.list_topic_papers(topic.id):
             papers[scored.paper.key] = scored.paper
             topic_links.setdefault(scored.paper.key, []).append(
-                {"id": topic.id, "name": topic.name, "score": round(float(scored.score), 1)}
+                {
+                    "id": topic.id,
+                    "name": topic.name,
+                    "score": round(float(scored.score), 1),
+                    "inherited": scored.inherited,
+                }
             )
     for paper in kb.list_local_papers():
         papers.setdefault(paper.key, paper)
@@ -81,15 +88,44 @@ def build_library_graph(kb: KnowledgeBase, data_dir) -> dict:
         record["has_profile"] = bool(profile and profile.exists())
         record["profile_updated_at"] = file_updated(profile) if profile else ""
     known_topics = {item.id: item for item in kb.list_topics()}
-    topics = {
-        topic.id: {
+    parent_rows = kb.topic_parent_rows()
+    manual_pairs = kb.manual_related_pairs()
+    shared_pairs = kb.shared_topic_pairs()
+    topics = {}
+    for topic in known_topics.values():
+        parents = [
+            {"id": parent_id, "name": known_topics[parent_id].name}
+            for child_id, parent_id in parent_rows
+            if child_id == topic.id and parent_id in known_topics
+        ]
+        children = [
+            {"id": child_id, "name": known_topics[child_id].name}
+            for child_id, parent_id in parent_rows
+            if parent_id == topic.id and child_id in known_topics
+        ]
+        related = []
+        for left, right in sorted(manual_pairs | shared_pairs):
+            other = right if left == topic.id else left if right == topic.id else ""
+            if not other or other not in known_topics:
+                continue
+            pair = (left, right)
+            related.append(
+                {
+                    "id": other,
+                    "name": known_topics[other].name,
+                    "manual": pair in manual_pairs,
+                    "shared": pair in shared_pairs,
+                }
+            )
+        topics[topic.id] = {
             "id": topic.id,
             "name": topic.name,
             "has_profile": topic_profile_path(data_dir, topic).exists(),
             "profile_updated_at": file_updated(topic_profile_path(data_dir, topic)),
+            "parents": parents,
+            "children": children,
+            "related": related,
         }
-        for topic in known_topics.values()
-    }
     paper_nodes = []
     for paper in papers.values():
         reading = readings[paper.key]
@@ -107,6 +143,7 @@ def build_library_graph(kb: KnowledgeBase, data_dir) -> dict:
                 "has_note": reading["has_note"],
                 "note_updated_at": reading["note_updated_at"],
                 "has_file": bool(paper.local_path),
+                "file_suffix": Path(paper.local_path).suffix.lower() if paper.local_path else "",
                 "score": max(scores) if scores else 0,
                 "authors": author_links.get(paper.key, []),
                 "topics": topic_links.get(paper.key, []),

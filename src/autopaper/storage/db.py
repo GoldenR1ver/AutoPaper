@@ -184,9 +184,43 @@ CREATE TABLE IF NOT EXISTS highlights (
 CREATE INDEX IF NOT EXISTS idx_highlights_scope ON highlights(scope, scope_id);
 """
 
+SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS topic_parents (
+  child_id TEXT NOT NULL,
+  parent_id TEXT NOT NULL,
+  PRIMARY KEY (child_id, parent_id),
+  FOREIGN KEY (child_id) REFERENCES topics(id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_id) REFERENCES topics(id) ON DELETE CASCADE,
+  CHECK (child_id != parent_id)
+);
+
+CREATE TABLE IF NOT EXISTS topic_related (
+  left_id TEXT NOT NULL,
+  right_id TEXT NOT NULL,
+  PRIMARY KEY (left_id, right_id),
+  FOREIGN KEY (left_id) REFERENCES topics(id) ON DELETE CASCADE,
+  FOREIGN KEY (right_id) REFERENCES topics(id) ON DELETE CASCADE,
+  CHECK (left_id < right_id)
+);
+"""
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _kept_local_path(papers: list[Paper]) -> str:
+    ranked = sorted(
+        papers,
+        key=lambda paper: (
+            0 if paper.local_path and Path(paper.local_path).exists() else 1,
+            -len(normalize_title(paper.title)),
+        ),
+    )
+    for paper in ranked:
+        if paper.local_path:
+            return paper.local_path
+    return ""
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -267,6 +301,10 @@ class KnowledgeBase:
         if version < 3:
             self.conn.executescript(SCHEMA_V3)
             self.conn.execute("INSERT INTO schema_version(version) VALUES (3)")
+            version = 3
+        if version < 4:
+            self.conn.executescript(SCHEMA_V4)
+            self.conn.execute("INSERT INTO schema_version(version) VALUES (4)")
         self.conn.commit()
 
     def save_topic(self, topic: Topic) -> Topic:
@@ -494,6 +532,40 @@ class KnowledgeBase:
         )
         self.conn.commit()
 
+    def descendant_ids(self, topic_id: str) -> list[str]:
+        rows = self.conn.execute("SELECT child_id, parent_id FROM topic_parents").fetchall()
+        children: dict[str, list[str]] = {}
+        for row in rows:
+            children.setdefault(row["parent_id"], []).append(row["child_id"])
+        found: list[str] = []
+        seen: set[str] = set()
+        stack = list(children.get(topic_id, []))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            found.append(current)
+            stack.extend(children.get(current, []))
+        return found
+
+    def ancestor_ids(self, topic_id: str) -> list[str]:
+        rows = self.conn.execute("SELECT child_id, parent_id FROM topic_parents").fetchall()
+        parents: dict[str, list[str]] = {}
+        for row in rows:
+            parents.setdefault(row["child_id"], []).append(row["parent_id"])
+        found: list[str] = []
+        seen: set[str] = set()
+        stack = list(parents.get(topic_id, []))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            found.append(current)
+            stack.extend(parents.get(current, []))
+        return found
+
     def list_topic_papers(
         self,
         topic_id: str,
@@ -501,22 +573,100 @@ class KnowledgeBase:
         include_held: bool = True,
         min_score: float | None = None,
     ) -> list[ScoredPaper]:
-        sql = """
-            SELECT papers.*, topic_papers.heuristic_score, topic_papers.llm_score,
+        topic_ids = [topic_id, *self.descendant_ids(topic_id)]
+        placeholders = ", ".join("?" for _ in topic_ids)
+        sql = f"""
+            SELECT papers.*, topic_papers.topic_id AS link_topic_id,
+                   topic_papers.heuristic_score, topic_papers.llm_score,
                    topic_papers.score, topic_papers.reason, topic_papers.status
             FROM topic_papers
             JOIN papers ON papers.key = topic_papers.paper_key
-            WHERE topic_papers.topic_id = ?
+            WHERE topic_papers.topic_id IN ({placeholders})
         """
-        params: list = [topic_id]
+        params: list = list(topic_ids)
         if not include_held:
             sql += " AND topic_papers.status = 'candidate'"
         if min_score is not None:
             sql += " AND topic_papers.score >= ?"
             params.append(min_score)
-        sql += " ORDER BY topic_papers.score DESC, papers.citation_count DESC, papers.year DESC"
         rows = self.conn.execute(sql, params).fetchall()
-        return [self._scored(row) for row in rows]
+        chosen: dict[str, ScoredPaper] = {}
+        direct: dict[str, bool] = {}
+        for row in rows:
+            scored = self._scored(row)
+            is_direct = row["link_topic_id"] == topic_id
+            if not is_direct:
+                scored.inherited = True
+            previous = chosen.get(scored.paper.key)
+            if previous is None or (is_direct and not direct[scored.paper.key]) or (
+                is_direct == direct.get(scored.paper.key) and scored.score > previous.score
+            ):
+                chosen[scored.paper.key] = scored
+                direct[scored.paper.key] = is_direct
+        return sorted(
+            chosen.values(),
+            key=lambda item: (-item.score, -(item.paper.citation_count or 0), -(item.paper.year or 0), item.paper.title.casefold()),
+        )
+
+    def set_topic_parent(self, child_id: str, parent_id: str) -> None:
+        child = self.get_topic(child_id)
+        parent = self.get_topic(parent_id)
+        if child.id == parent.id or parent.id in self.descendant_ids(child.id):
+            raise AutoPaperError("这样设置会让主题从属关系绕回自身。")
+        self.conn.execute(
+            "INSERT OR IGNORE INTO topic_parents (child_id, parent_id) VALUES (?, ?)",
+            (child.id, parent.id),
+        )
+        self.conn.commit()
+
+    def remove_topic_parent(self, child_id: str, parent_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM topic_parents WHERE child_id = ? AND parent_id = ?",
+            (child_id, parent_id),
+        )
+        self.conn.commit()
+
+    def topic_parent_rows(self) -> list[tuple[str, str]]:
+        rows = self.conn.execute("SELECT child_id, parent_id FROM topic_parents").fetchall()
+        return [(row["child_id"], row["parent_id"]) for row in rows]
+
+    def add_topic_related(self, left_id: str, right_id: str) -> None:
+        left = self.get_topic(left_id)
+        right = self.get_topic(right_id)
+        if left.id == right.id:
+            raise AutoPaperError("主题不能和自己相关。")
+        pair = tuple(sorted((left.id, right.id)))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO topic_related (left_id, right_id) VALUES (?, ?)",
+            pair,
+        )
+        self.conn.commit()
+
+    def remove_topic_related(self, left_id: str, right_id: str) -> None:
+        pair = tuple(sorted((left_id, right_id)))
+        self.conn.execute("DELETE FROM topic_related WHERE left_id = ? AND right_id = ?", pair)
+        self.conn.commit()
+
+    def manual_related_pairs(self) -> set[tuple[str, str]]:
+        rows = self.conn.execute("SELECT left_id, right_id FROM topic_related").fetchall()
+        return {(row["left_id"], row["right_id"]) for row in rows}
+
+    def shared_topic_pairs(self) -> set[tuple[str, str]]:
+        rows = self.conn.execute("SELECT topic_id, paper_key FROM topic_papers").fetchall()
+        by_paper: dict[str, set[str]] = {}
+        for row in rows:
+            by_paper.setdefault(row["paper_key"], set()).add(row["topic_id"])
+        pairs: set[tuple[str, str]] = set()
+        for topic_ids in by_paper.values():
+            ordered = sorted(topic_ids)
+            for index, left in enumerate(ordered):
+                for right in ordered[index + 1 :]:
+                    pairs.add((left, right))
+        return pairs
+
+    def direct_topic_ids(self, paper_key: str) -> set[str]:
+        rows = self.conn.execute("SELECT topic_id FROM topic_papers WHERE paper_key = ?", (paper_key,)).fetchall()
+        return {row["topic_id"] for row in rows}
 
     def resolve_paper(self, token: str) -> Paper | None:
         text = token.strip()
@@ -839,7 +989,17 @@ class KnowledgeBase:
             """,
             (paper_key,),
         ).fetchall()
-        return [self._topic(row) for row in rows]
+        topics = [self._topic(row) for row in rows]
+        seen = {topic.id for topic in topics}
+        for topic in list(topics):
+            for ancestor_id in self.ancestor_ids(topic.id):
+                if ancestor_id in seen:
+                    continue
+                ancestor = self.get_topic(ancestor_id)
+                topics.append(ancestor)
+                seen.add(ancestor.id)
+        topics.sort(key=lambda item: item.name.casefold())
+        return topics
 
     def list_local_papers(self, *, author_id: str | None = None, topic_id: str | None = None) -> list[Paper]:
         sql = """
@@ -851,8 +1011,10 @@ class KnowledgeBase:
             sql += " AND papers.key IN (SELECT paper_key FROM author_papers WHERE author_id = ?)"
             params.append(author_id)
         if topic_id:
-            sql += " AND papers.key IN (SELECT paper_key FROM topic_papers WHERE topic_id = ?)"
-            params.append(topic_id)
+            topic_ids = [topic_id, *self.descendant_ids(topic_id)]
+            placeholders = ", ".join("?" for _ in topic_ids)
+            sql += f" AND papers.key IN (SELECT paper_key FROM topic_papers WHERE topic_id IN ({placeholders}))"
+            params.extend(topic_ids)
         sql += " ORDER BY papers.title"
         rows = self.conn.execute(sql, params).fetchall()
         return [self._paper(row) for row in rows]
@@ -863,6 +1025,131 @@ class KnowledgeBase:
             return False
         row = self.conn.execute("SELECT 1 FROM papers WHERE title_norm = ? LIMIT 1", (norm,)).fetchone()
         return row is not None
+
+    def list_papers(self) -> list[Paper]:
+        rows = self.conn.execute("SELECT * FROM papers ORDER BY title").fetchall()
+        return [self._paper(row) for row in rows]
+
+    def find_same_paper(self, paper: Paper, threshold: float = 92) -> Paper | None:
+        from autopaper.models import copy_paper
+        from autopaper.pipeline.dedup import same_paper
+
+        current = copy_paper(paper).cleanup()
+        for existing in self.list_papers():
+            if existing.key and existing.key == current.key:
+                continue
+            if same_paper(existing, current, threshold):
+                return existing
+        return None
+
+    def duplicate_groups(self, threshold: float = 92) -> list[list[Paper]]:
+        from autopaper.pipeline.dedup import group_papers
+
+        return group_papers(self.list_papers(), threshold)
+
+    def merge_same_papers(self, threshold: float = 92) -> list[dict]:
+        merged = []
+        for group in self.duplicate_groups(threshold):
+            merged.append(self._merge_paper_group(group))
+        return merged
+
+    def _merge_paper_group(self, group: list[Paper]) -> dict:
+        ordered = sorted(group, key=self._paper_richness, reverse=True)
+        combined = ordered[0]
+        for other in ordered[1:]:
+            combined = merge_papers(combined, other)
+        combined.local_path = _kept_local_path(ordered)
+        keeper = ordered[0]
+        created_at = self._earliest_created([paper.key for paper in ordered])
+        self._write_paper(keeper.key, combined, created_at, _iso(utcnow()) or "", insert=False)
+        for other in ordered[1:]:
+            self._adopt_key(other.key, keeper.key)
+        canonical = make_key(combined)
+        if canonical != keeper.key:
+            occupant = self.conn.execute("SELECT 1 FROM papers WHERE key = ?", (canonical,)).fetchone()
+            if occupant is None or canonical == keeper.key:
+                self._adopt_key(keeper.key, canonical)
+                keeper_key = canonical
+            else:
+                keeper_key = keeper.key
+        else:
+            keeper_key = keeper.key
+        if combined.local_path:
+            self.set_local_path(keeper_key, combined.local_path)
+        removed = [paper.title for paper in ordered[1:]]
+        extra_files = [
+            paper.local_path
+            for paper in ordered
+            if paper.local_path and paper.local_path != combined.local_path
+        ]
+        return {
+            "key": keeper_key,
+            "title": combined.title,
+            "removed": removed,
+            "extra_files": extra_files,
+        }
+
+    def _paper_richness(self, paper: Paper) -> tuple:
+        reading = self.get_reading(paper.key) or {}
+        return (
+            len(str(reading.get("markdown") or "")),
+            len(paper.abstract or ""),
+            len(normalize_title(paper.title)),
+            1 if paper.doi else 0,
+        )
+
+    def _earliest_created(self, keys: list[str]) -> str:
+        placeholders = ", ".join("?" for _ in keys)
+        row = self.conn.execute(
+            f"SELECT MIN(created_at) AS created_at FROM papers WHERE key IN ({placeholders})",
+            keys,
+        ).fetchone()
+        return row["created_at"] if row and row["created_at"] else _iso(utcnow()) or ""
+
+    def get_author(self, author_id: str) -> Author:
+        row = self.conn.execute("SELECT * FROM authors WHERE id = ?", (author_id,)).fetchone()
+        if row is None:
+            raise NotFoundError(f"没有找到作者：{author_id}")
+        return self._author(row)
+
+    def delete_paper(self, key: str) -> Paper:
+        paper = self.resolve_paper(key)
+        if paper is None:
+            raise NotFoundError(f"没有找到论文：{key}")
+        self.conn.execute("DELETE FROM highlights WHERE scope = 'paper' AND scope_id = ?", (paper.key,))
+        self.conn.execute("DELETE FROM papers WHERE key = ?", (paper.key,))
+        self.conn.commit()
+        return paper
+
+    def delete_author(self, author_id: str) -> Author:
+        author = self.get_author(author_id)
+        self.conn.execute("DELETE FROM highlights WHERE scope = 'author' AND scope_id = ?", (author.id,))
+        self._delete_synthesis_highlights(author_id=author.id)
+        self.conn.execute("DELETE FROM authors WHERE id = ?", (author.id,))
+        self.conn.commit()
+        return author
+
+    def delete_topic_record(self, topic_id: str) -> Topic:
+        topic = self.get_topic(topic_id)
+        self.conn.execute("DELETE FROM highlights WHERE scope = 'topic' AND scope_id = ?", (topic.id,))
+        self._delete_synthesis_highlights(topic_id=topic.id)
+        self.delete_topic(topic.id)
+        return topic
+
+    def _delete_synthesis_highlights(self, *, author_id: str = "", topic_id: str = "") -> None:
+        rows = self.conn.execute("SELECT id, scope_id FROM highlights WHERE scope = 'synthesis'").fetchall()
+        for row in rows:
+            left, _, right = str(row["scope_id"]).partition("|")
+            if (author_id and left == author_id) or (topic_id and right == topic_id):
+                self.conn.execute("DELETE FROM highlights WHERE id = ?", (row["id"],))
+
+    def delete_reading(self, key: str) -> Paper:
+        paper = self.resolve_paper(key)
+        if paper is None:
+            raise NotFoundError(f"没有找到论文：{key}")
+        self.conn.execute("DELETE FROM readings WHERE paper_key = ?", (paper.key,))
+        self.conn.commit()
+        return paper
 
     def set_local_path(self, key: str, path: str) -> None:
         self.conn.execute(
